@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## 4.5.0 - 2026-10-31
+
 ### Changed
 
 - 格式化仅在请求提供有效 `tabSize` / `insertSpaces` 且 Rust 从文档导航中识别到 `%@MACRO` header 时执行；整文档与范围格式化均尊重编辑器缩进设置。
