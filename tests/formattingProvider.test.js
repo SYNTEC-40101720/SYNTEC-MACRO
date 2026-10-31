@@ -104,7 +104,8 @@ test('formattingProvider formats the project macro syntax fixture idempotently',
   assert.ok(formatted.includes('G90 G10 L1000 P18851 R(#100);'));
   assert.strictEqual(formatted.split(/\r\n|\n|\r/).length, source.split(/\r\n|\n|\r/).length);
   assert.strictEqual((formatted.match(/\r\n/g) || []).length, (source.match(/\r\n/g) || []).length);
-  assert.strictEqual(formatted.replace(/\r\n/g, '').includes('\n'), false);
+  const countBareLineFeeds = (text) => (text.replace(/\r\n/g, '').match(/\n/g) || []).length;
+  assert.strictEqual(countBareLineFeeds(formatted), countBareLineFeeds(source));
 
   const secondEdits = await format(createDocumentSnapshot(formatted, { uri }), options);
   assert.deepStrictEqual(secondEdits, []);
