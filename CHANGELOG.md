@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- 关闭诊断开关时使进行中的分析请求失效，避免过期结果重新写入诊断集合。
+- Rust 导航分析器未就绪时不缓存空结果，使后续工作区查询可以重新扫描先前跳过的文件。
+- 升级清单请求限制最多 5 次重定向，并通过总超时约束请求耗时。
+
 ## 4.4.0 - 2026-10-31
 
 ### Changed
