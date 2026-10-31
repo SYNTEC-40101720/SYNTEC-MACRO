@@ -8,7 +8,8 @@ const ROOT = path.resolve(__dirname, '..');
 
 function runCli(executable, args) {
   const useShell = process.platform === 'win32' && executable.endsWith('.cmd');
-  const result = spawnSync(executable, args, { encoding: 'utf8', shell: useShell });
+  const command = useShell ? `"${executable}"` : executable;
+  const result = spawnSync(command, args, { encoding: 'utf8', shell: useShell });
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);
   if (result.status !== 0) {

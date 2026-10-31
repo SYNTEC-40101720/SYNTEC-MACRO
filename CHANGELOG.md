@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## 4.4.0 - 2026-10-31
+
+### Changed
+
+- 格式化整理赋值、算术、比较及逻辑运算符周围的空格，并将 `NOT` 与操作数分开。
+
 ## 4.3.0 - 2026-09-27
 
 ### Added

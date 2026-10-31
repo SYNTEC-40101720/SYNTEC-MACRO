@@ -104,3 +104,80 @@ test('formattingProvider normalize_assignment_operator equals → colon-equals',
   assert.ok(edits.length >= 1);
   assert.ok(edits[0].newText.includes('#1 := #2'), 'should normalize = to := in edits');
 }));
+
+test('formattingProvider adds spaces around assignment and binary arithmetic operators', withVscodeMock(async () => {
+  const doc = createDocumentSnapshot('%@MACRO\n#1:=#2+3-1;\n', { uri: 'file:///test.nc' });
+  const edits = await format(doc, { insertSpaces: false, tabSize: 4 });
+  assert.strictEqual(edits.length, 1);
+  assert.strictEqual(edits[0].newText, '%@MACRO\n#1 := #2 + 3 - 1;\n');
+}));
+
+test('formattingProvider preserves unary signs, G-code signs, and operators in comments', withVscodeMock(async () => {
+  const doc = createDocumentSnapshot(
+    '%@MACRO\n#1 := -2;\nG01 X-10 Y+5;\n// #1:=#2+3-1;\n(* #1:=#2+3-1; *)\n',
+    { uri: 'file:///test.nc' }
+  );
+  const edits = await format(doc, { insertSpaces: false, tabSize: 4 });
+  assert.deepStrictEqual(edits, []);
+}));
+
+test('formattingProvider spaces supported binary, comparison, and logical operators', withVscodeMock(async () => {
+  const doc = createDocumentSnapshot(
+    'IF #1=#2<>#3<#4>#5<=#6>=#7 AND#8&#9 XOR#10 OR#11 THEN\n#12:=#13+3-1*4/2 MOD#14;\nEND_IF;',
+    { uri: 'file:///test.nc' }
+  );
+  const edits = await format(doc, { insertSpaces: false, tabSize: 4 });
+  assert.strictEqual(edits.length, 1);
+  assert.strictEqual(
+    edits[0].newText,
+    'IF #1 = #2 <> #3 < #4 > #5 <= #6 >= #7 AND #8 & #9 XOR #10 OR #11 THEN\n    #12 := #13 + 3 - 1 * 4 / 2 MOD #14;\nEND_IF;'
+  );
+  const secondEdits = await format(
+    createDocumentSnapshot(edits[0].newText, { uri: 'file:///test.nc' }),
+    { insertSpaces: false, tabSize: 4 }
+  );
+  assert.deepStrictEqual(secondEdits, []);
+}));
+
+test('formattingProvider separates NOT and preserves numeric exponent signs', withVscodeMock(async () => {
+  const doc = createDocumentSnapshot('#1:=nOt#2;\n#3:=1E-3;', { uri: 'file:///test.nc' });
+  const edits = await format(doc, { insertSpaces: false, tabSize: 4 });
+  assert.strictEqual(edits.length, 1);
+  assert.strictEqual(edits[0].newText, '#1 := nOt #2;\n#3 := 1E-3;');
+}));
+
+test('formattingProvider preserves extended motion arguments and G-code signs', withVscodeMock(async () => {
+  const doc = createDocumentSnapshot(
+    'G200 X1=50. Y1=30.;\nMOVC LP=1 GP=2 X1=10. Y1=-2.;\nG01 X-#103 Y+5;',
+    { uri: 'file:///test.nc' }
+  );
+  const edits = await format(doc, { insertSpaces: false, tabSize: 4 });
+  assert.deepStrictEqual(edits, []);
+}));
+
+test('formattingProvider preserves keywords and operators in strings and comments', withVscodeMock(async () => {
+  const doc = createDocumentSnapshot(
+    'MSG("ENDIF THEN #4=#5 +"); // ENDIF THEN #4=#5 +\n(* ENDIF THEN #4=#5 +\nTHEN #4=#5 + *)',
+    { uri: 'file:///test.nc' }
+  );
+  const edits = await format(doc, { insertSpaces: false, tabSize: 4 });
+  assert.deepStrictEqual(edits, []);
+}));
+
+test('formattingProvider preserves Unicode comment offsets and string indentation', withVscodeMock(async () => {
+  const doc = createDocumentSnapshot(
+    '(*😀*) G01 X10\n(*😀*) #1=#2;\n(*😀*) ENDIF;\nIF #1 THEN\n    MSG("ENDIF");\n    #2=1;\nEND_IF;',
+    { uri: 'file:///test.nc' }
+  );
+  const edits = await format(doc, { insertSpaces: false, tabSize: 4 });
+  assert.strictEqual(edits.length, 1);
+  assert.strictEqual(
+    edits[0].newText,
+    '(*😀*) G01 X10;\n(*😀*) #1 := #2;\n(*😀*) END_IF;\nIF #1 THEN\n    MSG("ENDIF");\n    #2 := 1;\nEND_IF;'
+  );
+  const secondEdits = await format(
+    createDocumentSnapshot(edits[0].newText, { uri: 'file:///test.nc' }),
+    { insertSpaces: false, tabSize: 4 }
+  );
+  assert.deepStrictEqual(secondEdits, []);
+}));

@@ -2269,8 +2269,8 @@ fn is_macro_header_line(line: &str) -> bool {
 }
 
 /// Mirror of `statementClassifier.getStatementTerminatorInfo`. Returns
-/// `(has_semicolon, semicolon_col, end_col)`. `semicolon_col`/`end_col` are
-/// 0-based UTF-16 indices into `clean_line` (matching JS `cleanLine.search`).
+/// `(has_semicolon, semicolon_col, end_col)`. The columns are character
+/// indices into `clean_line` so callers can apply edits to the aligned source.
 fn get_statement_terminator_info(clean_line: &str) -> (bool, usize, usize) {
     let chars: Vec<char> = clean_line.chars().collect();
     let mut last_non_space = 0usize;
@@ -2287,12 +2287,12 @@ fn get_statement_terminator_info(clean_line: &str) -> (bool, usize, usize) {
     }
     let has_semicolon = chars[last_non_space] == ';';
     let semicolon_col = if has_semicolon {
-        utf16_prefix_len(&chars, last_non_space)
+        last_non_space
     } else {
         // JS `cleanLine.search(/;\s*$/)` returns -1 when no match.
         usize::MAX
     };
-    let end_col = utf16_prefix_len(&chars, last_non_space + 1);
+    let end_col = last_non_space + 1;
     (has_semicolon, semicolon_col, end_col)
 }
 
@@ -2390,7 +2390,7 @@ fn slice_after_word<'a>(statement: &'a str, word: &str) -> Option<&'a str> {
 
 /// Mirror of `formatter.getKeywords`: list control-flow/middle keyword
 /// occurrences in `clean_line`, upper-cased.
-fn formatter_keywords(clean_line: &str) -> Vec<String> {
+fn formatter_keywords(clean_line: &str, string_mask: &[bool]) -> Vec<String> {
     let mut keywords = Vec::new();
     let target = [
         "END_REPEAT", "END_WHILE", "END_CASE", "END_FOR", "END_IF", "ENDREPEAT",
@@ -2398,14 +2398,22 @@ fn formatter_keywords(clean_line: &str) -> Vec<String> {
         "WHILE", "CASE", "FOR", "IF", "UNTIL",
     ];
     let chars: Vec<char> = clean_line.chars().collect();
+    if chars.len() != string_mask.len() {
+        return keywords;
+    }
     let mut index = 0;
     while index < chars.len() {
-        if !(chars[index].is_ascii_alphabetic() || chars[index] == '_') {
+        if string_mask[index]
+            || !(chars[index].is_ascii_alphabetic() || chars[index] == '_')
+        {
             index += 1;
             continue;
         }
         let start = index;
-        while index < chars.len() && (chars[index].is_ascii_alphanumeric() || chars[index] == '_') {
+        while index < chars.len()
+            && !string_mask[index]
+            && (chars[index].is_ascii_alphanumeric() || chars[index] == '_')
+        {
             index += 1;
         }
         let upper: String = chars[start..index].iter().collect::<String>().to_ascii_uppercase();
@@ -2449,7 +2457,7 @@ fn get_leading_whitespace(line: &str) -> String {
 /// into `END_IF/END_FOR/...` based on positions found in `clean_line`. The
 /// returned string mirrors JS `line` (source case preserved) with replacements
 /// applied.
-fn normalize_keyword_aliases(line: &str, clean_line: &str) -> String {
+fn normalize_keyword_aliases(line: &str, clean_line: &str, string_mask: &[bool]) -> String {
     let aliases = [
         ("ENDIF", "END_IF"),
         ("ENDFOR", "END_FOR"),
@@ -2463,18 +2471,26 @@ fn normalize_keyword_aliases(line: &str, clean_line: &str) -> String {
         .collect();
     let mut replacements = Vec::new();
     let chars: Vec<char> = clean_line.chars().collect();
+    if chars.len() != string_mask.len() {
+        return line.to_string();
+    }
     let mut index = 0;
     while index < chars.len() {
+        if string_mask[index] {
+            index += 1;
+            continue;
+        }
         if chars[index].is_ascii_alphabetic() {
             let start = index;
-            while index < chars.len() && chars[index].is_ascii_alphanumeric() {
+            while index < chars.len()
+                && !string_mask[index]
+                && chars[index].is_ascii_alphanumeric()
+            {
                 index += 1;
             }
             let upper: String = chars[start..index].iter().collect::<String>().to_ascii_uppercase();
             if let Some((_, replacement)) = aliases.iter().find(|(alias, _)| *alias == upper) {
-                let utf16_start = utf16_prefix_len(&chars, start);
-                let utf16_end = utf16_prefix_len(&chars, index);
-                replacements.push((utf16_start, utf16_end, *replacement));
+                replacements.push((start, index, *replacement));
             }
         } else {
             index += 1;
@@ -2484,77 +2500,120 @@ fn normalize_keyword_aliases(line: &str, clean_line: &str) -> String {
         return line.to_string();
     }
     let mut normalized = String::new();
-    let mut cursor = 0usize;
-    let mut utf16_cursor = 0usize;
+    let mut byte_cursor = 0usize;
+    let mut character_cursor = 0usize;
     for (start, end, replacement) in replacements {
-        while utf16_cursor < start {
-            if let Some(character) = line[cursor..].chars().next() {
+        while character_cursor < start {
+            if let Some(character) = line[byte_cursor..].chars().next() {
                 normalized.push(character);
-                cursor += character.len_utf8();
-                utf16_cursor += character.len_utf16();
+                byte_cursor += character.len_utf8();
+                character_cursor += 1;
             } else {
                 break;
             }
         }
         normalized.push_str(replacement);
-        while utf16_cursor < end {
-            if let Some(character) = line[cursor..].chars().next() {
-                cursor += character.len_utf8();
-                utf16_cursor += character.len_utf16();
+        while character_cursor < end {
+            if let Some(character) = line[byte_cursor..].chars().next() {
+                byte_cursor += character.len_utf8();
+                character_cursor += 1;
             } else {
                 break;
             }
         }
     }
-    normalized.push_str(&line[cursor..]);
+    normalized.push_str(&line[byte_cursor..]);
     normalized
 }
 
-/// Mirror of `formatter.normalizeAssignmentOperator`: rewrite `=` to `:=` for
-/// assignment targets `#/​@/​AR/​MAR`. The JS pattern
-/// `(?:^|;|\bTHEN\b|\bDO\b|:)\s*(target)\s*=(?!=)` selects the `=` that is
-/// not followed by `=` and is preceded by one of those anchoring terminators
-/// (after optional whitespace). We scan unicode-aware boundaries of
-/// whole-word positions via `word_positions` and emit UTF-16 offsets into
-/// `clean_line`; the returned string mirrors JS `line` with `=` -> `:=`.
-fn normalize_assignment_operator(line: &str, clean_line: &str) -> String {
-    let chars: Vec<char> = clean_line.chars().collect();
-    if chars.is_empty() {
+/// Mirror of `formatter.removeControlStructureTerminator`: drop trailing `;`
+/// from a block header / branch / case label line.
+fn remove_control_structure_terminator(
+    line: &str,
+    clean_line: &str,
+    statement_kind: StatementKind,
+) -> String {
+    if !matches!(
+        statement_kind,
+        StatementKind::BlockHeader
+            | StatementKind::Branch
+            | StatementKind::CaseLabel
+    ) {
+        return line.to_string();
+    }
+    let (has_semicolon, semicolon_col, _) = get_statement_terminator_info(clean_line);
+    if !has_semicolon {
         return line.to_string();
     }
 
-    let is_numeric_target = |upper: &str| -> bool {
-        if let Some(rest) = upper.strip_prefix(['#', '@']) {
-            !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+    let mut result = String::with_capacity(line.len().saturating_sub(1));
+    let mut removed = false;
+    for (character_index, character) in line.chars().enumerate() {
+        if !removed && character_index == semicolon_col && character == ';' {
+            removed = true;
         } else {
-            false
+            result.push(character);
         }
-    };
-    let is_bracket_target = |upper: &str| -> bool {
-        if let Some(rest) = upper.strip_prefix(['#', '@']) {
-            rest.starts_with('[') && rest.ends_with(']') && rest.len() > 2
-        } else {
-            false
-        }
-    };
-    let is_assignment_keyword = |upper: &str| -> bool { upper == "AR" || upper == "MAR" };
+    }
+    if removed {
+        result
+    } else {
+        line.to_string()
+    }
+}
 
-    let mut equals_utf16_offsets: Vec<usize> = Vec::new();
+fn normalize_statement_terminator(line: &str, clean_line: &str) -> String {
+    if clean_line.trim().is_empty()
+        || is_macro_header_line(clean_line)
+        || clean_line.trim() == "%"
+    {
+        return line.to_string();
+    }
+    let kind = classify_statement_for_formatter(clean_line);
+    if matches!(
+        kind,
+        StatementKind::BlockHeader
+            | StatementKind::Branch
+            | StatementKind::CaseLabel
+            | StatementKind::DanglingComparison
+    ) {
+        return line.to_string();
+    }
+    let (has_semicolon, _, end_col) = get_statement_terminator_info(clean_line);
+    if has_semicolon || end_col == usize::MAX {
+        return line.to_string();
+    }
+    let mut result = String::with_capacity(line.len() + 1);
+    let mut emitted = false;
+    for (character_index, character) in line.chars().enumerate() {
+        if !emitted && character_index == end_col {
+            result.push(';');
+            emitted = true;
+        }
+        result.push(character);
+    }
+    if !emitted {
+        result.push(';');
+    }
+    result
+}
+fn normalize_assignment_operator(line: &str, clean_line: &str, string_mask: &[bool]) -> String {
+    let chars: Vec<char> = clean_line.chars().collect();
+    if chars.len() != string_mask.len() {
+        return line.to_string();
+    }
+    let mut equals_char_indices = Vec::new();
     let mut current_index = 0usize;
     while current_index < chars.len() {
-        let is_alpha = chars[current_index].is_ascii_alphabetic();
-        let is_target_coordinator =
-            matches!(chars[current_index], '#' | '@');
-        if !is_alpha && !is_target_coordinator {
+        if string_mask[current_index] {
             current_index += 1;
             continue;
         }
-
         let start = current_index;
-        let mut end = current_index;
-        if is_target_coordinator {
-            end += 1;
-            if end < chars.len() && chars[end] == '[' {
+        let mut is_app_variable = false;
+        let end = if matches!(chars[current_index], '#' | '@') {
+            let mut end = current_index + 1;
+            if chars.get(end) == Some(&'[') {
                 while end < chars.len() && chars[end] != ']' {
                     end += 1;
                 }
@@ -2566,24 +2625,49 @@ fn normalize_assignment_operator(line: &str, clean_line: &str) -> String {
                     end += 1;
                 }
             }
+            end
         } else {
-            while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+            let prefix_length = if current_index + 3 <= chars.len()
+                && chars[current_index..current_index + 3]
+                    .iter()
+                    .zip(['M', 'A', 'R'])
+                    .all(|(left, right)| left.eq_ignore_ascii_case(&right))
+            {
+                3
+            } else if current_index + 2 <= chars.len()
+                && chars[current_index..current_index + 2]
+                    .iter()
+                    .zip(['A', 'R'])
+                    .all(|(left, right)| left.eq_ignore_ascii_case(&right))
+            {
+                2
+            } else {
+                0
+            };
+            if prefix_length == 0
+                || (current_index > 0
+                    && formatter_is_identifier_character(chars[current_index - 1]))
+            {
+                current_index += 1;
+                continue;
+            }
+            is_app_variable = true;
+            let mut end = current_index + prefix_length;
+            while end < chars.len() && chars[end].is_ascii_digit() {
                 end += 1;
             }
-        }
-        let span: String = chars[start..end].iter().collect::<String>();
-        let upper = span.to_ascii_uppercase();
-        let is_target = is_numeric_target(&upper)
-            || is_bracket_target(&upper)
-            || is_assignment_keyword(&upper);
-        if !is_target {
+            end
+        };
+        if (is_app_variable && chars[end - 1].is_ascii_digit())
+            || (!is_app_variable
+                && (end == start + 1
+                    || (chars.get(start + 1) == Some(&'[') && end <= start + 3)))
+        {
             current_index = end;
             continue;
         }
-
-        let tail_start = end;
-        let mut tail_end = tail_start;
-        if is_assignment_keyword(&upper) {
+        let mut tail_end = end;
+        if is_app_variable {
             while tail_end < chars.len() && (chars[tail_end] == ' ' || chars[tail_end] == '\t') {
                 tail_end += 1;
             }
@@ -2652,24 +2736,23 @@ fn normalize_assignment_operator(line: &str, clean_line: &str) -> String {
             }
         };
         if preceding_ok {
-            let utf16_offset = utf16_prefix_len(&chars, equals_look);
-            equals_utf16_offsets.push(utf16_offset);
+            equals_char_indices.push(equals_look);
             current_index = equals_look + 1;
         } else {
             current_index = end;
         }
     }
 
-    if equals_utf16_offsets.is_empty() {
+    if equals_char_indices.is_empty() {
         return line.to_string();
     }
-    equals_utf16_offsets.sort();
-    equals_utf16_offsets.dedup();
-    let mut normalized = String::with_capacity(line.len() + equals_utf16_offsets.len());
-    let mut utf16_cursor = 0usize;
+    equals_char_indices.sort();
+    equals_char_indices.dedup();
+    let mut normalized = String::with_capacity(line.len() + equals_char_indices.len());
+    let mut character_cursor = 0usize;
     let mut byte_cursor = 0usize;
-    for offset in equals_utf16_offsets {
-        while utf16_cursor < offset {
+    for index in equals_char_indices {
+        while character_cursor < index {
             let rest = &line[byte_cursor..];
             let character = match rest.chars().next() {
                 Some(character) => character,
@@ -2677,11 +2760,11 @@ fn normalize_assignment_operator(line: &str, clean_line: &str) -> String {
             };
             normalized.push(character);
             byte_cursor += character.len_utf8();
-            utf16_cursor += character.len_utf16();
+            character_cursor += 1;
         }
-        if utf16_cursor == offset {
+        if character_cursor == index {
             normalized.push_str(":=");
-            utf16_cursor += 1;
+            character_cursor += 1;
             byte_cursor += 1;
         }
     }
@@ -2689,82 +2772,753 @@ fn normalize_assignment_operator(line: &str, clean_line: &str) -> String {
     normalized
 }
 
-/// Mirror of `formatter.removeControlStructureTerminator`: drop trailing `;`
-/// from a block header / branch / case label line.
-fn remove_control_structure_terminator(
-    line: &str,
-    clean_line: &str,
-    kind: StatementKind,
-) -> String {
-    if !matches!(
-        kind,
-        StatementKind::BlockHeader | StatementKind::Branch | StatementKind::CaseLabel
-    ) {
-        return line.to_string();
+fn formatter_is_horizontal_space(character: char) -> bool {
+    matches!(character, ' ' | '\t')
+}
+
+fn formatter_is_identifier_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_'
+}
+
+fn formatter_is_operator_symbol(character: char) -> bool {
+    matches!(character, ':' | '=' | '!' | '&' | '|' | '+' | '-' | '*' | '/' | '<' | '>' | '^' | '%' | '~')
+}
+
+fn formatter_is_code_character(
+    line_chars: &[char],
+    clean_chars: &[char],
+    string_mask: &[bool],
+    index: usize,
+) -> bool {
+    line_chars.get(index) == clean_chars.get(index)
+        && !string_mask.get(index).copied().unwrap_or(true)
+}
+
+fn formatter_operator_word_left_boundary(
+    clean_chars: &[char],
+    start: usize,
+    allow_numeric_prefix: bool,
+) -> bool {
+    if start == 0 {
+        return true;
     }
-    let (has_semicolon, semicolon_col, _) = get_statement_terminator_info(clean_line);
-    if !has_semicolon || semicolon_col == usize::MAX {
-        return line.to_string();
+    let previous = clean_chars[start - 1];
+    if !formatter_is_identifier_character(previous) {
+        return true;
     }
-    let mut result = String::with_capacity(line.len());
-    let mut utf16_index = 0usize;
-    for character in line.chars() {
-        if utf16_index == semicolon_col {
-            // Drop this `;`.
-            utf16_index += 1;
+    if !allow_numeric_prefix || !previous.is_ascii_digit() {
+        return false;
+    }
+
+    let mut token_start = start - 1;
+    while token_start > 0 && formatter_is_identifier_character(clean_chars[token_start - 1]) {
+        token_start -= 1;
+    }
+    if token_start > 0 && matches!(clean_chars[token_start - 1], '#' | '@') {
+        return true;
+    }
+    !clean_chars[token_start].is_ascii_alphabetic() && clean_chars[token_start] != '_'
+}
+
+fn formatter_operator_word_at(
+    line_chars: &[char],
+    clean_chars: &[char],
+    string_mask: &[bool],
+    start: usize,
+    word: &str,
+    allow_numeric_prefix: bool,
+) -> bool {
+    if !word.is_ascii() {
+        return false;
+    }
+    let end = start + word.len();
+    if end > clean_chars.len()
+        || !formatter_operator_word_left_boundary(clean_chars, start, allow_numeric_prefix)
+        || (end < clean_chars.len()
+            && formatter_is_identifier_character(clean_chars[end]))
+    {
+        return false;
+    }
+    if !(start..end).all(|index| {
+        formatter_is_code_character(line_chars, clean_chars, string_mask, index)
+    }) {
+        return false;
+    }
+    clean_chars[start..end]
+        .iter()
+        .zip(word.bytes())
+        .all(|(character, expected)| {
+            character.is_ascii() && (*character as u8).eq_ignore_ascii_case(&expected)
+        })
+}
+
+fn formatter_previous_non_space(clean_chars: &[char], index: usize) -> Option<usize> {
+    let mut cursor = index;
+    while cursor > 0 {
+        cursor -= 1;
+        if !clean_chars[cursor].is_ascii_whitespace() {
+            return Some(cursor);
+        }
+    }
+    None
+}
+
+fn formatter_word_ending_at(clean_chars: &[char], end: usize) -> String {
+    let mut start = end;
+    while start > 0 && formatter_is_identifier_character(clean_chars[start - 1]) {
+        start -= 1;
+    }
+    clean_chars[start..end]
+        .iter()
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
+fn formatter_is_non_operand_keyword(word: &str) -> bool {
+    matches!(
+        word,
+        "IF"
+            | "ELSE"
+            | "ELSEIF"
+            | "ELSIF"
+            | "THEN"
+            | "FOR"
+            | "WHILE"
+            | "DO"
+            | "CASE"
+            | "OF"
+            | "REPEAT"
+            | "UNTIL"
+            | "END_IF"
+            | "END_FOR"
+            | "END_WHILE"
+            | "END_CASE"
+            | "END_REPEAT"
+            | "ENDIF"
+            | "ENDFOR"
+            | "ENDWHILE"
+            | "ENDCASE"
+            | "ENDREPEAT"
+            | "MOD"
+            | "AND"
+            | "XOR"
+            | "OR"
+            | "NOT"
+    )
+}
+
+fn formatter_has_operand_before(clean_chars: &[char], index: usize) -> bool {
+    let Some(previous) = formatter_previous_non_space(clean_chars, index) else {
+        return false;
+    };
+    match clean_chars[previous] {
+        '#' | '@' | ')' | ']' | '"' | '.' => true,
+        character if character.is_ascii_digit() => true,
+        character if character.is_ascii_alphabetic() || character == '_' => {
+            !formatter_is_non_operand_keyword(&formatter_word_ending_at(
+                clean_chars,
+                previous + 1,
+            ))
+        }
+        _ => false,
+    }
+}
+
+fn formatter_has_operand_after(
+    line_chars: &[char],
+    clean_chars: &[char],
+    string_mask: &[bool],
+    index: usize,
+) -> bool {
+    let mut cursor = index;
+    loop {
+        while cursor < clean_chars.len() && clean_chars[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= clean_chars.len() {
+            return false;
+        }
+        if formatter_is_code_character(line_chars, clean_chars, string_mask, cursor)
+            && matches!(clean_chars[cursor], '+' | '-')
+        {
+            cursor += 1;
             continue;
         }
-        result.push(character);
-        utf16_index += character.len_utf16();
-    }
-    result
-}
-
-/// Mirror of `formatter.normalizeStatementTerminator`: append `;` to a
-/// trailing statement when missing.
-fn normalize_statement_terminator(line: &str, clean_line: &str) -> String {
-    let trimmed_clean = clean_line.trim();
-    if trimmed_clean.is_empty()
-        || trimmed_clean.starts_with("//")
-        || trimmed_clean.eq_ignore_ascii_case("%@MACRO")
-        || trimmed_clean == "%"
-    {
-        return line.to_string();
-    }
-    let kind = classify_statement_for_formatter(clean_line);
-    if matches!(
-        kind,
-        StatementKind::BlockHeader
-            | StatementKind::Branch
-            | StatementKind::CaseLabel
-            | StatementKind::DanglingComparison
-    ) {
-        return line.to_string();
-    }
-    let (has_semicolon, _, end_col) = get_statement_terminator_info(clean_line);
-    if has_semicolon {
-        return line.to_string();
-    }
-    if end_col == usize::MAX {
-        return line.to_string();
-    }
-    let mut result = String::with_capacity(line.len() + 1);
-    let mut utf16_index = 0usize;
-    let mut emitted = false;
-    for character in line.chars() {
-        if !emitted && utf16_index == end_col {
-            result.push(';');
-            emitted = true;
+        if formatter_operator_word_at(
+            line_chars,
+            clean_chars,
+            string_mask,
+            cursor,
+            "NOT",
+            false,
+        ) {
+            cursor += 3;
+            continue;
         }
-        result.push(character);
-        utf16_index += character.len_utf16();
+        break;
     }
-    if !emitted {
-        result.push(';');
+
+    if cursor >= clean_chars.len() {
+        return false;
     }
-    result
+    match clean_chars[cursor] {
+        '#' | '@' | '(' | '[' | '"' | '.' => true,
+        character if character.is_ascii_digit() => true,
+        character if character.is_ascii_alphabetic() || character == '_' => {
+            let mut end = cursor + 1;
+            while end < clean_chars.len() && formatter_is_identifier_character(clean_chars[end]) {
+                end += 1;
+            }
+            let word = clean_chars[cursor..end]
+                .iter()
+                .collect::<String>()
+                .to_ascii_uppercase();
+            !formatter_is_non_operand_keyword(&word)
+        }
+        _ => false,
+    }
 }
 
+fn formatter_is_numeric_exponent_sign(
+    line_chars: &[char],
+    clean_chars: &[char],
+    string_mask: &[bool],
+    index: usize,
+) -> bool {
+    if index < 2 || index + 1 >= clean_chars.len() {
+        return false;
+    }
+    let exponent = index - 1;
+    let mantissa_end = exponent - 1;
+    formatter_is_code_character(line_chars, clean_chars, string_mask, exponent)
+        && formatter_is_code_character(line_chars, clean_chars, string_mask, mantissa_end)
+        && matches!(clean_chars[exponent], 'E' | 'e')
+        && (clean_chars[mantissa_end].is_ascii_digit() || clean_chars[mantissa_end] == '.')
+        && clean_chars[index + 1].is_ascii_digit()
+}
+
+fn formatter_is_nc_axis_letter(character: char) -> bool {
+    matches!(
+        character.to_ascii_uppercase(),
+        'X' | 'Y' | 'Z' | 'U' | 'V' | 'W' | 'A' | 'B' | 'C' | 'I' | 'J' | 'K' | 'R'
+    )
+}
+
+fn formatter_is_nc_motion_prefix(prefix: &[char]) -> bool {
+    if prefix.is_empty() {
+        return false;
+    }
+    let mut cursor = 0usize;
+    while cursor < prefix.len() {
+        if !matches!(prefix[cursor].to_ascii_uppercase(), 'N' | 'G') {
+            return false;
+        }
+        cursor += 1;
+        let digits_start = cursor;
+        while cursor < prefix.len() && prefix[cursor].is_ascii_digit() {
+            cursor += 1;
+        }
+        if cursor == digits_start {
+            return false;
+        }
+    }
+    true
+}
+
+fn formatter_previous_nc_coordinate_axis(
+    clean_chars: &[char],
+    axis_index: usize,
+) -> Option<usize> {
+    let mut value_start = axis_index;
+    while value_start > 0 && clean_chars[value_start - 1].is_ascii_digit() {
+        value_start -= 1;
+    }
+    let has_trailing_digits = value_start < axis_index;
+    let mut has_exponent = false;
+    if has_trailing_digits
+        && value_start >= 2
+        && matches!(clean_chars[value_start - 1], '+' | '-')
+        && matches!(clean_chars[value_start - 2], 'E' | 'e')
+    {
+        value_start -= 2;
+        has_exponent = true;
+    } else if has_trailing_digits
+        && value_start > 0
+        && matches!(clean_chars[value_start - 1], 'E' | 'e')
+    {
+        value_start -= 1;
+        has_exponent = true;
+    }
+
+    if has_exponent {
+        let mut has_mantissa_digits = false;
+        while value_start > 0 && clean_chars[value_start - 1].is_ascii_digit() {
+            value_start -= 1;
+            has_mantissa_digits = true;
+        }
+        if value_start > 0 && clean_chars[value_start - 1] == '.' {
+            value_start -= 1;
+            while value_start > 0 && clean_chars[value_start - 1].is_ascii_digit() {
+                value_start -= 1;
+                has_mantissa_digits = true;
+            }
+        }
+        if !has_mantissa_digits {
+            return None;
+        }
+    } else if has_trailing_digits {
+        if value_start > 0 && clean_chars[value_start - 1] == '.' {
+            value_start -= 1;
+            while value_start > 0 && clean_chars[value_start - 1].is_ascii_digit() {
+                value_start -= 1;
+            }
+        }
+    } else if value_start > 0 && clean_chars[value_start - 1] == '.' {
+        value_start -= 1;
+        let integer_start = value_start;
+        while value_start > 0 && clean_chars[value_start - 1].is_ascii_digit() {
+            value_start -= 1;
+        }
+        if integer_start == value_start {
+            return None;
+        }
+    } else {
+        return None;
+    }
+
+    if value_start > 0 && matches!(clean_chars[value_start - 1], '+' | '-') {
+        value_start -= 1;
+    }
+    let previous_axis_index = value_start.checked_sub(1)?;
+    formatter_is_nc_axis_letter(clean_chars[previous_axis_index]).then_some(previous_axis_index)
+}
+
+fn formatter_is_nc_coordinate_prefix(clean_chars: &[char], axis_index: usize) -> bool {
+    let mut current_axis_index = axis_index;
+    loop {
+        let mut word_start = current_axis_index;
+        while word_start > 0 && formatter_is_identifier_character(clean_chars[word_start - 1]) {
+            word_start -= 1;
+        }
+        if formatter_is_nc_motion_prefix(&clean_chars[word_start..current_axis_index]) {
+            return true;
+        }
+        if word_start == current_axis_index {
+            return true;
+        }
+        let Some(previous_axis_index) =
+            formatter_previous_nc_coordinate_axis(clean_chars, current_axis_index)
+        else {
+            return false;
+        };
+        current_axis_index = previous_axis_index;
+    }
+}
+
+fn formatter_is_nc_coordinate_sign(
+    line_chars: &[char],
+    clean_chars: &[char],
+    string_mask: &[bool],
+    index: usize,
+) -> bool {
+    let Some(letter_index) = index.checked_sub(1) else {
+        return false;
+    };
+    if !formatter_is_code_character(line_chars, clean_chars, string_mask, letter_index) {
+        return false;
+    }
+    if !formatter_is_nc_axis_letter(clean_chars[letter_index])
+        || !formatter_is_nc_coordinate_prefix(clean_chars, letter_index)
+    {
+        return false;
+    }
+    formatter_has_operand_after(line_chars, clean_chars, string_mask, index + 1)
+}
+
+fn formatter_is_unary_sign(
+    line_chars: &[char],
+    clean_chars: &[char],
+    string_mask: &[bool],
+    index: usize,
+) -> bool {
+    formatter_is_numeric_exponent_sign(line_chars, clean_chars, string_mask, index)
+        || formatter_is_nc_coordinate_sign(line_chars, clean_chars, string_mask, index)
+        || !formatter_has_operand_before(clean_chars, index)
+}
+
+fn formatter_is_extended_argument_equal(clean_chars: &[char], index: usize) -> bool {
+    if index >= clean_chars.len() || clean_chars[index] != '=' {
+        return false;
+    }
+    let mut argument_end = index;
+    while argument_end > 0 && formatter_is_horizontal_space(clean_chars[argument_end - 1]) {
+        argument_end -= 1;
+    }
+    let mut argument_start = argument_end;
+    while argument_start > 0
+        && formatter_is_identifier_character(clean_chars[argument_start - 1])
+    {
+        argument_start -= 1;
+    }
+    if argument_start == argument_end {
+        return false;
+    }
+
+    let argument = clean_chars[argument_start..argument_end]
+        .iter()
+        .collect::<String>()
+        .to_ascii_uppercase();
+    let argument_chars: Vec<char> = argument.chars().collect();
+    let is_numbered_axis_argument = argument_chars.len() > 1
+        && matches!(
+            argument_chars[0],
+            'A' | 'B' | 'C' | 'F' | 'S' | 'U' | 'V' | 'W' | 'X' | 'Y' | 'Z'
+        )
+        && argument_chars[1..]
+            .iter()
+            .all(|character| character.is_ascii_digit());
+
+    is_numbered_axis_argument || matches!(argument.as_str(), "LP" | "GP")
+}
+
+fn formatter_unsupported_compound_operator_end(
+    line_chars: &[char],
+    clean_chars: &[char],
+    string_mask: &[bool],
+    index: usize,
+) -> Option<usize> {
+    if !formatter_is_code_character(line_chars, clean_chars, string_mask, index)
+        || index + 1 >= clean_chars.len()
+        || !formatter_is_code_character(line_chars, clean_chars, string_mask, index + 1)
+    {
+        return None;
+    }
+    let current = clean_chars[index];
+    let next = clean_chars[index + 1];
+
+    if current == ':' && next == ':' {
+        let mut end = index + 2;
+        while end < clean_chars.len()
+            && formatter_is_code_character(line_chars, clean_chars, string_mask, end)
+            && formatter_is_operator_symbol(clean_chars[end])
+        {
+            end += 1;
+        }
+        return Some(end);
+    }
+    if current == ':'
+        && next == '='
+        && index + 2 < clean_chars.len()
+        && formatter_is_code_character(line_chars, clean_chars, string_mask, index + 2)
+        && formatter_is_operator_symbol(clean_chars[index + 2])
+        && !(matches!(clean_chars[index + 2], '+' | '-')
+            && formatter_is_unary_sign(line_chars, clean_chars, string_mask, index + 2)
+            && formatter_has_operand_after(line_chars, clean_chars, string_mask, index + 3)
+            && !(index + 3 < clean_chars.len()
+                && formatter_is_code_character(line_chars, clean_chars, string_mask, index + 3)
+                && formatter_is_operator_symbol(clean_chars[index + 3])))
+    {
+        let mut end = index + 3;
+        while end < clean_chars.len()
+            && formatter_is_code_character(line_chars, clean_chars, string_mask, end)
+            && formatter_is_operator_symbol(clean_chars[end])
+        {
+            end += 1;
+        }
+        return Some(end);
+    }
+    if current == '<'
+        && next == '='
+        && index + 2 < clean_chars.len()
+        && formatter_is_code_character(line_chars, clean_chars, string_mask, index + 2)
+        && clean_chars[index + 2] == '>'
+    {
+        return Some(index + 3);
+    }
+
+    let unsupported_pair = matches!(
+        (current, next),
+        ('=', '=')
+            | ('=', '<')
+            | ('=', '>')
+            | ('!', '=')
+            | ('!', '<')
+            | ('!', '>')
+            | ('&', '&')
+            | ('&', '=')
+            | ('|', '|')
+            | ('|', '=')
+            | ('^', '=')
+            | ('%', '=')
+            | ('~', '=')
+            | ('+', '+')
+            | ('+', '=')
+            | ('-', '-')
+            | ('-', '=')
+            | ('*', '*')
+            | ('*', '=')
+            | ('*', '/')
+            | ('/', '*')
+            | ('/', '=')
+            | ('<', '<')
+            | ('>', '>')
+            | ('>', '<')
+    );
+    if !unsupported_pair {
+        return None;
+    }
+
+    let mut end = index + 2;
+    while end < clean_chars.len()
+        && formatter_is_code_character(line_chars, clean_chars, string_mask, end)
+        && formatter_is_operator_symbol(clean_chars[end])
+    {
+        end += 1;
+    }
+    Some(end)
+}
+
+fn formatter_mark_operator_spacing(spaces: &mut [bool], start: usize, end: usize) {
+    spaces[start] = true;
+    spaces[end] = true;
+}
+
+fn formatter_operator_spacing_is_already_normalized(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let character = bytes[index];
+        if !matches!(
+            character,
+            b'0'..=b'9'
+                | b' '
+                | b'#'
+                | b'@'
+                | b'.'
+                | b'['
+                | b']'
+                | b'('
+                | b')'
+                | b';'
+                | b','
+                | b':'
+                | b'='
+                | b'<'
+                | b'>'
+                | b'+'
+                | b'-'
+                | b'*'
+                | b'/'
+                | b'&'
+        ) {
+            return false;
+        }
+
+        let operator_end = match character {
+            b':' if bytes.get(index + 1) == Some(&b'=') => index + 2,
+            b':' => return false,
+            b'<' if matches!(bytes.get(index + 1), Some(&b'=') | Some(&b'>')) => index + 2,
+            b'>' if bytes.get(index + 1) == Some(&b'=') => index + 2,
+            b'=' | b'<' | b'>' | b'+' | b'-' | b'*' | b'/' | b'&' => index + 1,
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        if index == 0
+            || bytes[index - 1] != b' '
+            || (index > 1 && bytes[index - 2] == b' ')
+            || operator_end >= bytes.len()
+            || bytes[operator_end] != b' '
+            || (operator_end + 1 < bytes.len() && bytes[operator_end + 1] == b' ')
+            || (index > 1
+                && matches!(
+                    bytes[index - 2],
+                    b':' | b'=' | b'<' | b'>' | b'+' | b'-' | b'*' | b'/' | b'&'
+                ))
+            || (operator_end + 1 < bytes.len()
+                && matches!(
+                    bytes[operator_end + 1],
+                    b':' | b'=' | b'<' | b'>' | b'+' | b'-' | b'*' | b'/' | b'&'
+                ))
+        {
+            return false;
+        }
+        index = operator_end;
+    }
+    true
+}
+fn normalize_operator_spacing(
+    line: &str,
+    clean_line: &str,
+    string_mask: &[bool],
+) -> Option<String> {
+    if line == clean_line
+        && line.len() == string_mask.len()
+        && string_mask.iter().all(|masked| !masked)
+        && formatter_operator_spacing_is_already_normalized(line)
+    {
+        return None;
+    }
+
+    let line_chars: Vec<char> = line.chars().collect();
+    let clean_chars: Vec<char> = clean_line.chars().collect();
+    if line_chars.len() != clean_chars.len() || line_chars.len() != string_mask.len() {
+        return None;
+    }
+
+    let mut spaces = vec![false; line_chars.len() + 1];
+    let mut index = 0usize;
+    while index < line_chars.len() {
+        if !formatter_is_code_character(&line_chars, &clean_chars, string_mask, index) {
+            index += 1;
+            continue;
+        }
+        if let Some(end) = formatter_unsupported_compound_operator_end(
+            &line_chars,
+            &clean_chars,
+            string_mask,
+            index,
+        ) {
+            index = end;
+            continue;
+        }
+        if matches!(clean_chars[index], 'N' | 'n')
+            && formatter_operator_word_at(
+                &line_chars,
+                &clean_chars,
+                string_mask,
+                index,
+                "NOT",
+                false,
+            )
+        {
+            let end = index + 3;
+            if formatter_has_operand_after(&line_chars, &clean_chars, string_mask, end) {
+                spaces[end] = true;
+            }
+            index = end;
+            continue;
+        }
+
+        let word_operator = match clean_chars[index] {
+            'M' | 'm' => Some("MOD"),
+            'A' | 'a' => Some("AND"),
+            'X' | 'x' => Some("XOR"),
+            'O' | 'o' => Some("OR"),
+            _ => None,
+        };
+        if let Some(word) = word_operator {
+            if formatter_operator_word_at(
+                &line_chars,
+                &clean_chars,
+                string_mask,
+                index,
+                word,
+                true,
+            ) {
+                let end = index + word.len();
+                if formatter_has_operand_before(&clean_chars, index)
+                    && formatter_has_operand_after(&line_chars, &clean_chars, string_mask, end)
+                {
+                    formatter_mark_operator_spacing(&mut spaces, index, end);
+                }
+                index = end;
+                continue;
+            }
+        }
+
+        let character = clean_chars[index];
+        let operator_end = match character {
+            ':' if index + 1 < line_chars.len()
+                && clean_chars[index + 1] == '='
+                && formatter_is_code_character(
+                    &line_chars,
+                    &clean_chars,
+                    string_mask,
+                    index + 1,
+                ) =>
+            {
+                Some(index + 2)
+            }
+            '<' if index + 1 < line_chars.len()
+                && matches!(clean_chars[index + 1], '=' | '>')
+                && formatter_is_code_character(
+                    &line_chars,
+                    &clean_chars,
+                    string_mask,
+                    index + 1,
+                ) =>
+            {
+                Some(index + 2)
+            }
+            '>' if index + 1 < line_chars.len()
+                && clean_chars[index + 1] == '='
+                && formatter_is_code_character(
+                    &line_chars,
+                    &clean_chars,
+                    string_mask,
+                    index + 1,
+                ) =>
+            {
+                Some(index + 2)
+            }
+            '=' if !formatter_is_extended_argument_equal(&clean_chars, index) => {
+                Some(index + 1)
+            }
+            '<' | '>' | '&' | '*' | '/' | '+' | '-' => Some(index + 1),
+            _ => None,
+        };
+
+        if let Some(end) = operator_end {
+            let is_unary_sign = matches!(character, '+' | '-')
+                && formatter_is_unary_sign(&line_chars, &clean_chars, string_mask, index);
+            if !is_unary_sign
+                && formatter_has_operand_before(&clean_chars, index)
+                && formatter_has_operand_after(&line_chars, &clean_chars, string_mask, end)
+            {
+                formatter_mark_operator_spacing(&mut spaces, index, end);
+            }
+            index = end;
+        } else {
+            index += 1;
+        }
+    }
+
+    let mut normalized = String::with_capacity(line.len() + spaces.iter().filter(|space| **space).count());
+    let mut emitted_boundaries = vec![false; spaces.len()];
+    let mut cursor = 0usize;
+    while cursor < line_chars.len() {
+        if formatter_is_horizontal_space(line_chars[cursor]) {
+            let start = cursor;
+            while cursor < line_chars.len() && formatter_is_horizontal_space(line_chars[cursor]) {
+                cursor += 1;
+            }
+            let normalize = (start..=cursor).any(|boundary| spaces[boundary]);
+            if normalize {
+                normalized.push(' ');
+                for boundary in start..=cursor {
+                    if spaces[boundary] {
+                        emitted_boundaries[boundary] = true;
+                    }
+                }
+            } else {
+                normalized.extend(line_chars[start..cursor].iter());
+            }
+            continue;
+        }
+        if spaces[cursor] && !emitted_boundaries[cursor] {
+            normalized.push(' ');
+            emitted_boundaries[cursor] = true;
+        }
+        normalized.push(line_chars[cursor]);
+        cursor += 1;
+    }
+    if spaces[line_chars.len()] && !emitted_boundaries[line_chars.len()] {
+        normalized.push(' ');
+    }
+    Some(normalized)
+}
 /// Mirror of `formatter.buildIndent`.
 fn build_indent(level: usize, options: &FormatOptions) -> String {
     let size = if options.tab_size > 0 {
@@ -2819,10 +3573,10 @@ pub fn format_document(text: &str, options: FormatOptions) -> String {
         }
 
         let line_start_in_block_comment = in_block_comment;
-        let (clean, _, _, next_state) =
+        let (clean, string_mask, _, next_state) =
             strip_comments_keep_strings(&trimmed, line_start_in_block_comment);
         in_block_comment = next_state;
-        let keywords = formatter_keywords(&clean);
+        let keywords = formatter_keywords(&clean, &string_mask);
         let statement_kind = classify_statement_for_formatter(&clean);
         let first_keyword = keywords.first().cloned();
         let starts_with_closer = first_keyword
@@ -2854,12 +3608,31 @@ pub fn format_document(text: &str, options: FormatOptions) -> String {
         let (normalized_clean, _, _, _) =
             strip_comments_keep_strings(&normalized_line, line_start_in_block_comment);
         normalized_line = normalize_statement_terminator(&normalized_line, &normalized_clean);
-        let (normalized_clean, _, _, _) =
+        let (normalized_clean, assignment_string_mask, _, _) =
             strip_comments_keep_strings(&normalized_line, line_start_in_block_comment);
-        normalized_line = normalize_assignment_operator(&normalized_line, &normalized_clean);
-        let (normalized_clean, _, _, _) =
+        normalized_line = normalize_assignment_operator(
+            &normalized_line,
+            &normalized_clean,
+            &assignment_string_mask,
+        );
+        let (normalized_clean, keyword_string_mask, _, _) =
             strip_comments_keep_strings(&normalized_line, line_start_in_block_comment);
-        normalized_line = normalize_keyword_aliases(&normalized_line, &normalized_clean);
+        normalized_line = normalize_keyword_aliases(
+            &normalized_line,
+            &normalized_clean,
+            &keyword_string_mask,
+        );
+        if line_start_in_block_comment
+            || !formatter_operator_spacing_is_already_normalized(&normalized_line)
+        {
+            let (normalized_clean, string_mask, _, _) =
+                strip_comments_keep_strings(&normalized_line, line_start_in_block_comment);
+            if let Some(spaced_line) =
+                normalize_operator_spacing(&normalized_line, &normalized_clean, &string_mask)
+            {
+                normalized_line = spaced_line;
+            }
+        }
         formatted.push(format!("{}{}", leading, normalized_line));
 
         if starts_with_middle {
@@ -5863,7 +6636,10 @@ impl AnalysisResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{analyze_document, analyze_request, Severity};
+    use super::{
+        analyze_document, analyze_request, format_document, normalize_operator_spacing,
+        FormatOptions, Severity,
+    };
     use super::{AnalysisRequest, DocumentSnapshot, PROTOCOL_VERSION};
     use super::RobotLineState;
     use super::{is_g10_l_line, validate_robot_line_state};
@@ -5882,6 +6658,338 @@ mod tests {
             },
             profile: "generic".to_string(),
         })
+    }
+
+    #[test]
+    fn formatter_operator_spacing_normalizes_confirmed_operators_and_preserves_protected_text() {
+        let options = FormatOptions::default();
+        let operators = format_document(
+            concat!(
+                "IF #1=#2<>#3<#4>#5<=#6>=#7 AND#8&#9 XOR#10 OR#11 THEN\n",
+                "#12:=#13+3-1*4/2 MOD#14;\n",
+                "END_IF;"
+            ),
+            options,
+        );
+        assert_eq!(
+            operators,
+            concat!(
+                "IF #1 = #2 <> #3 < #4 > #5 <= #6 >= #7 AND #8 & #9 XOR #10 OR #11 THEN\n",
+                "    #12 := #13 + 3 - 1 * 4 / 2 MOD #14;\n",
+                "END_IF;"
+            )
+        );
+        assert_eq!(format_document(&operators, options), operators);
+        assert_eq!(format_document("#1 < 2;", options), "#1 < 2;");
+        assert_eq!(format_document("#1<2;", options), "#1 < 2;");
+        assert_eq!(format_document("#NAME=1;", options), "#NAME = 1;");
+        assert_eq!(format_document("AR0=1;", options), "AR0 = 1;");
+        assert_eq!(format_document("#[#1]=2;", options), "#[#1] := 2;");
+        assert_eq!(format_document("AR[#1]=2;", options), "AR[#1] := 2;");
+
+        assert_eq!(
+            format_document("#1:=nOt#2", options),
+            "#1 := nOt #2;"
+        );
+        assert_eq!(
+            format_document(
+                "-2;\n+#1;\n-#1;\n#1:=1E-3;\nG01 X-10 Y+5",
+                options,
+            ),
+            "-2;\n+#1;\n-#1;\n#1 := 1E-3;\nG01 X-10 Y+5;"
+        );
+        assert_eq!(
+            format_document(
+                concat!(
+                    "#1==#2;\n",
+                    "#3!=#4;\n",
+                    "#5&&#6;\n",
+                    "#7||#8;\n",
+                    "#9++;\n",
+                    "#10+=1;\n",
+                    "#11--;\n",
+                    "#12+-#13;\n",
+                    "#14-+#15;"
+                ),
+                options,
+            ),
+            concat!(
+                "#1==#2;\n",
+                "#3!=#4;\n",
+                "#5&&#6;\n",
+                "#7||#8;\n",
+                "#9++;\n",
+                "#10+=1;\n",
+                "#11--;\n",
+                "#12 + -#13;\n",
+                "#14 - +#15;"
+            )
+        );
+        assert_eq!(
+            format_document(
+                concat!(
+                    "MSG(\"#1:=#2+3 AND #4\"); // #5+6\n",
+                    "#7:=#8+9; (* #10+11 *)\n",
+                    "(* #12+13\n",
+                    "#14*#15 *)\n",
+                    "#16+#17"
+                ),
+                options,
+            ),
+            concat!(
+                "MSG(\"#1:=#2+3 AND #4\"); // #5+6\n",
+                "#7 := #8 + 9; (* #10+11 *)\n",
+                "(* #12+13\n",
+                "#14*#15 *)\n",
+                "#16 + #17;"
+            )
+        );
+    }
+
+    #[test]
+    fn formatter_operator_spacing_fast_path_and_fallback_are_idempotent() {
+        let options = FormatOptions::default();
+        let fast_path_lines = [
+            "#1 := #1 + 50;",
+            "#1 + #2",
+            "#1 - #2",
+            "#1 * #2",
+            "#1 / #2",
+            "#1 < #2",
+            "#1 <= #2",
+            "#1 <> #2",
+            "#1 > #2",
+            "#1 >= #2",
+            "#1 = #2",
+            "#1 & #2",
+        ];
+        for line in fast_path_lines {
+            let mask = vec![false; line.len()];
+            assert!(
+                normalize_operator_spacing(line, line, &mask).is_none(),
+                "simple canonical line should use the no-change path: {line}"
+            );
+        }
+
+        let full_scanner_lines = [
+            "#1 MOD #2",
+            "#1 AND #2",
+            "#1 XOR #2",
+            "#1 OR #2",
+            "NOT #1",
+            "G01 X1=10. Y1=20.;",
+        ];
+        for line in full_scanner_lines {
+            let mask = vec![false; line.chars().count()];
+            assert_eq!(
+                normalize_operator_spacing(line, line, &mask).as_deref(),
+                Some(line),
+                "alphabetic line should retain the full-scanner path: {line}"
+            );
+        }
+
+        let uncertain_lines = [
+            "#1:=#1+50;",
+            "#1  := #1 + 50;",
+            "#1 :=  #1 + 50;",
+            "#1\t:= #1 + 50;",
+            "#1 : #1 + 50;",
+            "#1 < = #2",
+            "#1 := = #2",
+            "#1 + - #2",
+            "#1 | #2",
+            "#1_2 := #3",
+            "MSG(\"#1 + #2\")",
+            "(* *)",
+            "//",
+            "中文 #1 + #2",
+        ];
+        for line in uncertain_lines {
+            let mask = vec![false; line.chars().count()];
+            assert!(
+                normalize_operator_spacing(line, line, &mask).is_some(),
+                "uncertain line should retain the full-scanner path: {line}"
+            );
+        }
+
+        assert!(normalize_operator_spacing("", "", &[]).is_none());
+        let tab_line = "#1\t+\t50";
+        let tab_mask = vec![false; tab_line.len()];
+        assert_eq!(
+            normalize_operator_spacing(tab_line, tab_line, &tab_mask).as_deref(),
+            Some("#1 + 50")
+        );
+        assert_eq!(
+            format_document("#1:=#2+3\n\n#4:=#5+6", options),
+            "#1 := #2 + 3;\n\n#4 := #5 + 6;"
+        );
+
+        let cases = [
+            ("#1 + 50;", "#1 + 50;"),
+            ("#1+50;", "#1 + 50;"),
+            ("#1  +  50;", "#1 + 50;"),
+            ("#1\t+\t50;", "#1 + 50;"),
+            ("#1MOD#2;", "#1 MOD #2;"),
+            ("#1AND#2;", "#1 AND #2;"),
+            ("#1XOR#2;", "#1 XOR #2;"),
+            ("#1OR#2;", "#1 OR #2;"),
+            ("#1mOd#2;", "#1 mOd #2;"),
+            ("NOT#2;", "NOT #2;"),
+            ("#1 aNd #2;", "#1 aNd #2;"),
+            ("#1NOT#2;", "#1NOT#2;"),
+            ("SAND#1;", "SAND#1;"),
+            ("#1ANDY;", "#1ANDY;"),
+            ("#1==#2;", "#1==#2;"),
+        ];
+        for (input, expected) in cases {
+            let formatted = format_document(input, options);
+            assert_eq!(formatted, expected, "input: {input}");
+            assert_eq!(
+                format_document(&formatted, options),
+                formatted,
+                "second formatting for input: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn formatter_operator_spacing_fast_path_falls_back_for_protected_and_unicode_text() {
+        let options = FormatOptions::default();
+        let input = concat!(
+            "MSG(\"#1:=#2+3 AND #4\"); #7:=#8+9; // #5+6\n",
+            "(* #5+6 AND#6 *) #9:=#10+11;\n",
+            "MSG(\"中文\"); #12:=#13+14"
+        );
+        let formatted = format_document(input, options);
+        assert_eq!(
+            formatted,
+            concat!(
+                "MSG(\"#1:=#2+3 AND #4\"); #7 := #8 + 9; // #5+6\n",
+                "(* #5+6 AND#6 *) #9 := #10 + 11;\n",
+                "MSG(\"中文\"); #12 := #13 + 14;"
+            )
+        );
+        assert_eq!(format_document(&formatted, options), formatted);
+    }
+
+    #[test]
+    fn formatter_operator_spacing_preserves_keyword_aliases_in_strings() {
+        let options = FormatOptions::default();
+        let input = concat!(
+            "MSG(\"中文😀 ENDIF ENDFOR ENDWHILE ENDCASE ENDREPEAT := + -\");\n",
+            "ENDIF;"
+        );
+        let formatted = format_document(input, options);
+
+        assert_eq!(
+            formatted,
+            concat!(
+                "MSG(\"中文😀 ENDIF ENDFOR ENDWHILE ENDCASE ENDREPEAT := + -\");\n",
+                "END_IF;"
+            )
+        );
+        assert_eq!(format_document(&formatted, options), formatted);
+    }
+
+    #[test]
+    fn formatter_operator_spacing_preserves_unicode_comment_offsets_and_string_indentation() {
+        let options = FormatOptions::default();
+        let cases = [
+            ("(*😀*) G01 X10", "(*😀*) G01 X10;"),
+            ("(*😀*) ENDIF;", "(*😀*) END_IF;"),
+            ("(*😀*) #1=#2;", "(*😀*) #1 := #2;"),
+            (
+                "IF #1 THEN\n    MSG(\"ENDIF\");\n    #2=1;\nEND_IF;",
+                "IF #1 THEN\n    MSG(\"ENDIF\");\n    #2 := 1;\nEND_IF;",
+            ),
+        ];
+
+        for (input, expected) in cases {
+            let formatted = format_document(input, options);
+            assert_eq!(formatted, expected, "input: {input}");
+            assert_eq!(
+                format_document(&formatted, options),
+                formatted,
+                "second formatting for input: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn formatter_operator_spacing_preserves_real_motion_and_unary_cases() {
+        let options = FormatOptions::default();
+
+        let input = "#1:=-2;";
+        let formatted = format_document(input, options);
+        assert_eq!(formatted, "#1 := -2;", "input: {input}");
+        assert_eq!(
+            format_document(&formatted, options),
+            formatted,
+            "second formatting for input: {input}"
+        );
+
+        let input = "#2:=+#3;";
+        let formatted = format_document(input, options);
+        assert_eq!(formatted, "#2 := +#3;", "input: {input}");
+        assert_eq!(
+            format_document(&formatted, options),
+            formatted,
+            "second formatting for input: {input}"
+        );
+
+        let input = "G200 X1=50. Y1=30.;";
+        let formatted = format_document(input, options);
+        assert_eq!(formatted, input, "input: {input}");
+        assert_eq!(
+            format_document(&formatted, options),
+            formatted,
+            "second formatting for input: {input}"
+        );
+
+        let input = "MOVC X1=10. Y1=20. X2=-5. Y2=+5.;";
+        let formatted = format_document(input, options);
+        assert_eq!(formatted, input, "input: {input}");
+        assert_eq!(
+            format_document(&formatted, options),
+            formatted,
+            "second formatting for input: {input}"
+        );
+
+        let input = "MOVC LP=1 GP=2 X1=10. Y1=20. X2=-5. Y2=+5.;";
+        let formatted = format_document(input, options);
+        assert_eq!(formatted, input, "input: {input}");
+        assert_eq!(
+            format_document(&formatted, options),
+            formatted,
+            "second formatting for input: {input}"
+        );
+
+        let input = "G01X-10Y+5;";
+        let formatted = format_document(input, options);
+        assert_eq!(formatted, input, "input: {input}");
+        assert_eq!(
+            format_document(&formatted, options),
+            formatted,
+            "second formatting for input: {input}"
+        );
+
+        let input = "N10G01X-10Y+5;";
+        let formatted = format_document(input, options);
+        assert_eq!(formatted, input, "input: {input}");
+        assert_eq!(
+            format_document(&formatted, options),
+            formatted,
+            "second formatting for input: {input}"
+        );
+
+        let input = "MSG(\"THEN #4=#5\");";
+        let formatted = format_document(input, options);
+        assert_eq!(formatted, input, "input: {input}");
+        assert_eq!(
+            format_document(&formatted, options),
+            formatted,
+            "second formatting for input: {input}"
+        );
     }
 
     #[test]

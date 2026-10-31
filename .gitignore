@@ -32,6 +32,21 @@ desktop.ini
 # ==================== Environment & Logs ====================
 .env
 .env.local
+.env.*
+.npmrc
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+*.keystore
+id_rsa
+id_ed25519
+credentials.json
+token.json
+*.db
+*.sqlite
+*.sqlite3
 *.log
 
 # ==================== Release Notes (temporary) ====================

@@ -35,6 +35,24 @@ perf-data/
 # Dependencies
 node_modules/
 
+# Environment & Credentials
+.env
+.env.*
+.npmrc
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+*.keystore
+id_rsa
+id_ed25519
+credentials.json
+token.json
+*.db
+*.sqlite
+*.sqlite3
+
 # OS & IDE
 .DS_Store
 Thumbs.db
