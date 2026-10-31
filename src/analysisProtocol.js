@@ -14,10 +14,17 @@ const ANALYSIS_PROTOCOL_VERSION = 1;
  */
 
 /**
+ * @typedef {Object} AnalysisFormatOptions
+ * @property {number} tabSize
+ * @property {boolean} insertSpaces
+ */
+
+/**
  * @typedef {Object} AnalysisRequest
  * @property {number} protocolVersion
  * @property {DocumentSnapshot} document
  * @property {string} profile
+ * @property {AnalysisFormatOptions} [formatOptions]
  */
 
 /**
@@ -120,6 +127,27 @@ function assertNonNegativeInteger(value, name) {
 }
 
 /**
+ * @param {unknown} value
+ * @returns {AnalysisFormatOptions}
+ */
+function normalizeFormatOptions(value) {
+  assertRecord(value, 'options.formatOptions');
+  const options = /** @type {Record<string, unknown>} */ (value);
+  const tabSize = options.tabSize;
+  const insertSpaces = options.insertSpaces;
+  if (typeof tabSize !== 'number' || !Number.isInteger(tabSize) || tabSize <= 0) {
+    throw new TypeError('options.formatOptions.tabSize must be a positive integer');
+  }
+  if (typeof insertSpaces !== 'boolean') {
+    throw new TypeError('options.formatOptions.insertSpaces must be a boolean');
+  }
+  return {
+    tabSize,
+    insertSpaces
+  };
+}
+
+/**
  * @param {DocumentSnapshot} input
  * @returns {DocumentSnapshot}
  */
@@ -142,7 +170,7 @@ function createDocumentSnapshot(input) {
 
 /**
  * @param {DocumentSnapshot} document
- * @param {{profile?: string}} [options]
+ * @param {{profile?: string, formatOptions?: AnalysisFormatOptions}} [options]
  * @returns {AnalysisRequest}
  */
 function createAnalysisRequest(document, options = {}) {
@@ -150,11 +178,16 @@ function createAnalysisRequest(document, options = {}) {
   assertRecord(options, 'options');
   const profile = options.profile === undefined ? DEFAULT_PROFILE : options.profile;
   assertNonEmptyString(profile, 'options.profile');
-  return {
+  /** @type {AnalysisRequest} */
+  const request = {
     protocolVersion: ANALYSIS_PROTOCOL_VERSION,
     document: snapshot,
     profile
   };
+  if (options.formatOptions !== undefined) {
+    request.formatOptions = normalizeFormatOptions(options.formatOptions);
+  }
+  return request;
 }
 
 /**
@@ -167,8 +200,12 @@ function normalizeAnalysisRequest(request) {
       request.protocolVersion !== ANALYSIS_PROTOCOL_VERSION) {
     throw new TypeError(`unsupported analysis protocol version: ${request.protocolVersion}`);
   }
-  const normalized = createAnalysisRequest(request.document, { profile: request.profile });
-  return normalized;
+  /** @type {{profile?: string, formatOptions?: AnalysisFormatOptions}} */
+  const options = { profile: request.profile };
+  if (request.formatOptions !== undefined) {
+    options.formatOptions = request.formatOptions;
+  }
+  return createAnalysisRequest(request.document, options);
 }
 
 /**

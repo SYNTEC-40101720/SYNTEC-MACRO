@@ -56,12 +56,12 @@ function activateExtension() {
   return { subscriptions, context };
 }
 
-test('activate registers 8 language providers and 1 diagnostic collection', withVscodeMock(() => {
+test('activate registers 10 language providers and 1 diagnostic collection', withVscodeMock(() => {
   activateExtension();
   const registerCalls = languages._calls.filter(c => c.kind.startsWith('register'));
-  // 9 个 register：Completion/InlineCompletion/Hover/Definition/DocumentSymbol/
-  // WorkspaceSymbol/References/Formatting/CodeActions
-  assert.strictEqual(registerCalls.length, 9, `expected 9 register calls, got ${registerCalls.length}: ${registerCalls.map(c => c.kind)}`);
+  // 10 个 register：Completion/InlineCompletion/Hover/Definition/DocumentSymbol/
+  // WorkspaceSymbol/References/Formatting/RangeFormatting/CodeActions
+  assert.strictEqual(registerCalls.length, 10, `expected 10 register calls, got ${registerCalls.length}: ${registerCalls.map(c => c.kind)}`);
   const registeredKinds = new Set(registerCalls.map(c => c.kind));
   for (const expectedKind of [
     'registerCompletionItemProvider',
@@ -72,6 +72,7 @@ test('activate registers 8 language providers and 1 diagnostic collection', with
     'registerWorkspaceSymbolProvider',
     'registerReferenceProvider',
     'registerDocumentFormattingEditProvider',
+    'registerDocumentRangeFormattingEditProvider',
     'registerCodeActionsProvider'
   ]) {
     assert.ok(registeredKinds.has(expectedKind), `missing ${expectedKind} register call`);
@@ -114,7 +115,7 @@ test('activate subscribes to workspace events and pushes disposables into contex
   // onDidChangeTextDocument / onDidOpenTextDocument / onDidChangeConfiguration
   // 各返回一个 Disposable，应被推入 subscriptions。
   // 至少 3 个来自 workspace 事件的 Disposable + statusBar + 其它 register 返回
-  assert.ok(subscriptions.length >= 10, `expected at least 10 subscriptions (8 providers + command + statusbar + 3 events), got ${subscriptions.length}`);
+  assert.ok(subscriptions.length >= 11, `expected at least 11 subscriptions (9 providers + command + statusbar + 3 events), got ${subscriptions.length}`);
 }));
 
 test('activate logs extension version to console', withVscodeMock(() => {

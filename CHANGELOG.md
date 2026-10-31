@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- 格式化仅在请求提供有效 `tabSize` / `insertSpaces` 且 Rust 从文档导航中识别到 `%@MACRO` header 时执行；整文档与范围格式化均尊重编辑器缩进设置。
+- 范围格式化基于全文上下文，仅替换选区内实际变化的整行；保留混合 CRLF/LF 与原有末尾换行状态。
+
 ### Fixed
 
 - 关闭诊断开关时使进行中的分析请求失效，避免过期结果重新写入诊断集合。
@@ -25,7 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - 关键字行内补全 ghost text（1.67+ `InlineCompletionItemProvider`）：敲关键字前缀行内实时提示（Tab 采纳），唯一匹配单条直达、多匹配最多 3 条候选（行内 UI 切换）；61 个关键字全部可达（2 字母词结构性无可补内容不适用），可达性由审计测试守卫；遵守 `syntecMacro.enableCompletions` 开关。
 
-
 ## 4.2.1 - 2026-09-27
 
 ### Added
@@ -39,7 +43,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`engines.vscode` 最低版本 1.60 → 1.90**（2024-06）：1.90 之前的 VS Code 无法安装本版本。
 - 全局状态栏项改为 LanguageStatusItem：仅在打开宏文件时显示版本，不再常驻全局状态栏。
-
 
 ## 4.2.0 - 2026-09-23
 

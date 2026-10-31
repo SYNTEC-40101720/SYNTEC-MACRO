@@ -244,6 +244,10 @@ const languages = {
     languages._calls.push({ kind: 'registerDocumentFormattingEditProvider', selector, provider });
     return new Disposable(() => {});
   },
+  registerDocumentRangeFormattingEditProvider(selector, provider) {
+    languages._calls.push({ kind: 'registerDocumentRangeFormattingEditProvider', selector, provider });
+    return new Disposable(() => {});
+  },
   // LanguageStatusItem (1.65+)：extension.js 语言状态项入口
   createLanguageStatusItem(id, selector) {
     languages._calls.push({ kind: 'createLanguageStatusItem', id, selector });

@@ -52,6 +52,45 @@ test('createAnalysisRequest builds a normalized protocol request', () => {
   });
 });
 
+test('AnalysisRequest preserves optional VS Code formatting options', () => {
+  const document = createDocumentSnapshot({
+    uri: 'file:///program.nc',
+    version: 1,
+    languageId: 'syntec-macro',
+    text: '%@MACRO\n#1 := 1;'
+  });
+  const request = createAnalysisRequest(document, {
+    formatOptions: { tabSize: 2, insertSpaces: false }
+  });
+  assert.deepStrictEqual(request.formatOptions, { tabSize: 2, insertSpaces: false });
+  assert.deepStrictEqual(normalizeAnalysisRequest(request), request);
+  assert.strictEqual(
+    Object.hasOwn(normalizeAnalysisRequest(createAnalysisRequest(document)), 'formatOptions'),
+    false
+  );
+});
+
+test('AnalysisRequest rejects malformed formatting options', () => {
+  const document = createDocumentSnapshot({
+    uri: 'file:///program.nc',
+    version: 1,
+    languageId: 'syntec-macro',
+    text: '%@MACRO\n'
+  });
+  assert.throws(
+    () => createAnalysisRequest(document, { formatOptions: { tabSize: 0, insertSpaces: true } }),
+    /tabSize must be a positive integer/
+  );
+  assert.throws(
+    () => createAnalysisRequest(document, { formatOptions: { tabSize: 2.5, insertSpaces: true } }),
+    /tabSize must be a positive integer/
+  );
+  assert.throws(
+    () => createAnalysisRequest(document, { formatOptions: { tabSize: 2, insertSpaces: 1 } }),
+    /insertSpaces must be a boolean/
+  );
+});
+
 test('protocol rejects malformed shapes', () => {
   assert.throws(
     () => normalizeAnalysisRequest({

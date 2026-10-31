@@ -80,7 +80,7 @@ pub unsafe extern "C" fn syntec_core_free_output(pointer: *mut u8, length: usize
 
 /// Wasm ABI for P0-B 真实 request 传输: receives a JSON-serialized
 /// `AnalysisRequest` (protocolVersion + document.{uri, version, languageId,
-/// text} + profile) and returns a packed (pointer, length) pair holding the
+/// text} + profile + optional formatOptions) and returns a packed (pointer, length) pair holding the
 /// `AnalysisResult` JSON. Returns 0 on parse/validation failure so the adapter
 /// must take the explicit `onFallback` path instead of silently post-filling
 /// document/profile from the JS side. The caller frees the output via
@@ -192,6 +192,7 @@ pub struct AnalysisRequest {
     pub protocol_version: u32,
     pub document: DocumentSnapshot,
     pub profile: String,
+    pub format_options: Option<FormatOptions>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3553,8 +3554,16 @@ impl Default for FormatOptions {
 /// returns a stable normalized string; this Rust port produces the same bytes
 /// for the golden samples.
 pub fn format_document(text: &str, options: FormatOptions) -> String {
-    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
-    let lines = text.split('\n').map(|line| line.trim_end_matches('\r')).collect::<Vec<_>>();
+    let raw_lines = text.split('\n').collect::<Vec<_>>();
+    let line_endings = raw_lines
+        .iter()
+        .take(raw_lines.len().saturating_sub(1))
+        .map(|line| line.ends_with('\r'))
+        .collect::<Vec<_>>();
+    let lines = raw_lines
+        .iter()
+        .map(|line| line.trim_end_matches('\r'))
+        .collect::<Vec<_>>();
     let mut formatted: Vec<String> = Vec::with_capacity(lines.len());
     let mut indent_level = 0usize;
     let mut in_block_comment = false;
@@ -3660,7 +3669,18 @@ pub fn format_document(text: &str, options: FormatOptions) -> String {
         }
     }
 
-    formatted.join(eol)
+    let mut output = String::with_capacity(text.len());
+    for (index, line) in formatted.iter().enumerate() {
+        if index > 0 {
+            output.push_str(if line_endings[index - 1] {
+                "\r\n"
+            } else {
+                "\n"
+            });
+        }
+        output.push_str(line);
+    }
+    output
 }
 
 /// Minimal helper retained for future regex-backed formatter rules; the
@@ -5871,6 +5891,7 @@ pub fn analyze_document(content: &str) -> AnalysisResult {
         protocol_version: PROTOCOL_VERSION,
         document,
         profile: "generic".to_string(),
+        format_options: None,
     })
 }
 
@@ -5934,8 +5955,8 @@ pub fn analyze_navigation_request_json(json: &str) -> Result<AnalysisResult, Str
 /// Minimal JSON parser for `AnalysisRequest`. Avoids pulling in `serde` to keep
 /// the Wasm build footprint near 50 KB. Only implements the subset used by the
 /// protocol: `protocolVersion` (optional when -1 or absent), `document.{uri,
-/// version, languageId, text}`, and `profile`. Detects non-string / non-integer
-/// / missing-required cases and surfaces a textual error mirroring JS
+/// version, languageId, text}`, `profile`, and optional `formatOptions`.
+/// Detects non-string / non-integer / missing-required cases and surfaces a textual error mirroring JS
 /// `normalizeAnalysisRequest` assertions.
 pub fn parse_analysis_request(json: &str) -> Result<AnalysisRequest, String> {
     let trimmed = json.trim();
@@ -5976,7 +5997,42 @@ pub fn parse_analysis_request(json: &str) -> Result<AnalysisRequest, String> {
         }
         Some(other) => return Err(format!("analysis request.profile must be a string, got {other:?}")),
     };
-    Ok(AnalysisRequest { protocol_version, document, profile })
+    let format_options = match object_get(&root, "formatOptions") {
+        None => None,
+        Some(value) => Some(parse_format_options(value)?),
+    };
+    Ok(AnalysisRequest { protocol_version, document, profile, format_options })
+}
+
+fn parse_format_options(value: &JsonValue) -> Result<FormatOptions, String> {
+    let object = match value {
+        JsonValue::Object(entries) => entries,
+        other => return Err(format!("analysis request.formatOptions must be an object, got {other:?}")),
+    };
+    let tab_size = match object_get(object, "tabSize") {
+        Some(JsonValue::Number(value)) => {
+            let size = value.parse::<usize>().map_err(|_| {
+                format!("analysis request.formatOptions.tabSize must be a positive integer, got {value}")
+            })?;
+            if size == 0 {
+                return Err("analysis request.formatOptions.tabSize must be a positive integer".to_string());
+            }
+            size
+        }
+        Some(other) => {
+            return Err(format!("analysis request.formatOptions.tabSize must be a positive integer, got {other:?}"))
+        }
+        None => return Err("analysis request.formatOptions.tabSize is required".to_string()),
+    };
+    let insert_spaces = match object_get(object, "insertSpaces") {
+        Some(JsonValue::True) => true,
+        Some(JsonValue::False) => false,
+        Some(other) => {
+            return Err(format!("analysis request.formatOptions.insertSpaces must be a boolean, got {other:?}"))
+        }
+        None => return Err("analysis request.formatOptions.insertSpaces is required".to_string()),
+    };
+    Ok(FormatOptions { tab_size, insert_spaces })
 }
 
 fn parse_document_snapshot(value: &JsonValue) -> Result<DocumentSnapshot, String> {
@@ -6563,21 +6619,24 @@ pub fn analyze_request(request: AnalysisRequest) -> AnalysisResult {
         None => Vec::new(),
     };
 
-    // P0-B 第 2 项 edits/TextEdit: run the syntax-preserving formatter and
-    // produce a single whole-document `TextEdit` when the output differs from
-    // the input, mirroring JS `formatDocument` / `analysisCore.formatDocument`.
-    let formatted = format_document(&document.text, FormatOptions::default());
     let mut edits: Vec<AnalysisTextEdit> = Vec::new();
-    if formatted != document.text.as_str() {
-        let lines: Vec<&str> = document.text.split('\n').collect();
-        let last_line = lines.last().copied().unwrap_or("");
-        edits.push(AnalysisTextEdit {
-            line: 0,
-            start_character: 0,
-            end_line: lines.len().saturating_sub(1),
-            end_character: last_line.chars().count(),
-            new_text: formatted,
-        });
+    // Formatting is an opt-in request capability and is only safe for content
+    // identified as MACRO by navigation extraction, not by file extension.
+    if has_macro_header {
+        if let Some(options) = request.format_options {
+            let formatted = format_document(&document.text, options);
+            if formatted != document.text.as_str() {
+                let lines: Vec<&str> = document.text.split('\n').collect();
+                let last_line = lines.last().copied().unwrap_or("").trim_end_matches('\r');
+                edits.push(AnalysisTextEdit {
+                    line: 0,
+                    start_character: 0,
+                    end_line: lines.len().saturating_sub(1),
+                    end_character: last_line.encode_utf16().count(),
+                    new_text: formatted,
+                });
+            }
+        }
     }
     let _ = supported_profile;
 
@@ -6638,7 +6697,7 @@ impl AnalysisResult {
 mod tests {
     use super::{
         analyze_document, analyze_request, format_document, normalize_operator_spacing,
-        FormatOptions, Severity,
+        parse_analysis_request, FormatOptions, Severity,
     };
     use super::{AnalysisRequest, DocumentSnapshot, PROTOCOL_VERSION};
     use super::RobotLineState;
@@ -6648,16 +6707,127 @@ mod tests {
     /// 真实 `AnalysisRequest`, 以触发 P0-B 第 2 项导航元数据计算路径
     /// (`is_macro_file_content` 通过 MACRO_FILE_EXTENSIONS 命中)。
     fn analyze_macro_document(content: &str) -> super::AnalysisResult {
+        analyze_document_with_format_options(
+            "file:///test/macro.nc",
+            content,
+            None,
+        )
+    }
+
+    fn analyze_document_with_format_options(
+        uri: &str,
+        content: &str,
+        format_options: Option<FormatOptions>,
+    ) -> super::AnalysisResult {
         analyze_request(AnalysisRequest {
             protocol_version: PROTOCOL_VERSION,
             document: DocumentSnapshot {
-                uri: "file:///test/macro.nc".to_string(),
+                uri: uri.to_string(),
                 version: 0,
                 language_id: "syntec-macro".to_string(),
                 text: content.to_string(),
             },
             profile: "generic".to_string(),
+            format_options,
         })
+    }
+
+    #[test]
+    fn formatting_request_uses_custom_indentation_options() {
+        let content = "%@MACRO\nIF #1 = 1 THEN\n#1 = 2\nEND_IF;\n";
+        let spaces = analyze_document_with_format_options(
+            "file:///test/macro.nc",
+            content,
+            Some(FormatOptions {
+                tab_size: 2,
+                insert_spaces: true,
+            }),
+        );
+        assert_eq!(spaces.edits.len(), 1);
+        assert!(spaces.edits[0].new_text.contains("\n  #1 := 2;\n"));
+        assert!(!spaces.edits[0].new_text.contains('\t'));
+
+        let tabs = analyze_document_with_format_options(
+            "file:///test/macro.nc",
+            content,
+            Some(FormatOptions {
+                tab_size: 2,
+                insert_spaces: false,
+            }),
+        );
+        assert_eq!(tabs.edits.len(), 1);
+        assert!(tabs.edits[0].new_text.contains("\n\t#1 := 2;\n"));
+    }
+
+    #[test]
+    fn analysis_request_parser_validates_format_options() {
+        let valid = parse_analysis_request(
+            r#"{"protocolVersion":1,"document":{"uri":"file:///test/macro.nc","version":1,"languageId":"syntec-macro","text":"%@MACRO\n"},"profile":"generic","formatOptions":{"tabSize":2,"insertSpaces":false}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            valid.format_options,
+            Some(FormatOptions {
+                tab_size: 2,
+                insert_spaces: false,
+            })
+        );
+        let without_options = parse_analysis_request(
+            r#"{"document":{"uri":"file:///test/macro.nc","version":1,"languageId":"syntec-macro","text":"%@MACRO\n"}}"#,
+        )
+        .unwrap();
+        assert_eq!(without_options.format_options, None);
+
+        let invalid_tab_size = r#"{"document":{"uri":"file:///test.nc","version":1,"languageId":"syntec-macro","text":"%@MACRO"},"formatOptions":{"tabSize":0,"insertSpaces":true}}"#;
+        assert!(parse_analysis_request(invalid_tab_size).is_err());
+        let fractional_tab_size = r#"{"document":{"uri":"file:///test.nc","version":1,"languageId":"syntec-macro","text":"%@MACRO"},"formatOptions":{"tabSize":2.5,"insertSpaces":true}}"#;
+        assert!(parse_analysis_request(fractional_tab_size).is_err());
+        let invalid_insert_spaces = r#"{"document":{"uri":"file:///test.nc","version":1,"languageId":"syntec-macro","text":"%@MACRO"},"formatOptions":{"tabSize":2,"insertSpaces":1}}"#;
+        assert!(parse_analysis_request(invalid_insert_spaces).is_err());
+    }
+
+    #[test]
+    fn formatting_edits_require_options_and_a_macro_header() {
+        assert!(analyze_macro_document("%@MACRO\n#1=2;\n").edits.is_empty());
+
+        let iso = analyze_document_with_format_options(
+            "file:///test/iso.nc",
+            "%\nIF #1 = 1 THEN\n#1=2\nEND_IF;\n",
+            Some(FormatOptions::default()),
+        );
+        assert!(iso.edits.is_empty());
+    }
+
+    #[test]
+    fn formatter_preserves_mixed_line_endings_and_trailing_newline_state() {
+        let options = FormatOptions::default();
+        let input = "%@MACRO\r\nIF #1 = 1 THEN\n#1=2;\r\nEND_IF;\n";
+        assert_eq!(
+            format_document(input, options),
+            "%@MACRO\r\nIF #1 = 1 THEN\n    #1 := 2;\r\nEND_IF;\n"
+        );
+
+        let without_trailing_newline = "%@MACRO\r\n#1=2;\n#2=3;";
+        assert_eq!(
+            format_document(without_trailing_newline, options),
+            "%@MACRO\r\n#1 := 2;\n#2 := 3;"
+        );
+    }
+
+    #[test]
+    fn formatting_edit_end_character_uses_utf16_and_excludes_trailing_carriage_return() {
+        let content = "%@MACRO\r\n#1=#2; // 😀\r";
+        let result = analyze_document_with_format_options(
+            "file:///test/macro.nc",
+            content,
+            Some(FormatOptions::default()),
+        );
+        assert_eq!(result.edits.len(), 1);
+        assert_eq!(result.edits[0].end_line, 1);
+        assert_eq!(
+            result.edits[0].end_character,
+            "#1=#2; // 😀".encode_utf16().count()
+        );
     }
 
     #[test]

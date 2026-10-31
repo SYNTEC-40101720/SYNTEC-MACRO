@@ -11,13 +11,16 @@ const {
   normalizeRustAnalysisResult
 } = require('../scripts/rustWasmAdapter');
 
-function createRequest(text = 'IF #1 = 1 THEN', uri = 'file:///adapter.nc') {
+function createRequest(text = 'IF #1 = 1 THEN', uri = 'file:///adapter.nc', formatOptions) {
   return createAnalysisRequest(createDocumentSnapshot({
     uri,
     version: 3,
     languageId: 'syntec-macro',
     text
-  }), { profile: 'generic' });
+  }), {
+    profile: 'generic',
+    ...(formatOptions === undefined ? {} : { formatOptions })
+  });
 }
 
 function createRawResult(overrides = {}) {
@@ -199,15 +202,20 @@ test('createRustWasmAdapter prefers the P0-B request ABI and forwards the full A
     requestSink: receivedRequest
   });
   const adapter = createRustWasmAdapter(wasm);
-  const request = createRequest('N10;\n', 'file:///G1000');
+  const request = createRequest(
+    '%@MACRO\nN10;\n',
+    'file:///G1000',
+    { tabSize: 2, insertSpaces: false }
+  );
   const result = adapter(request);
   assert.strictEqual(result.backend, 'rust-wasm');
   assert.strictEqual(receivedRequest.length, 1);
   const forwarded = JSON.parse(receivedRequest[0]);
   assert.strictEqual(forwarded.protocolVersion, 1);
   assert.strictEqual(forwarded.document.uri, 'file:///G1000');
-  assert.strictEqual(forwarded.document.text, 'N10;\n');
+  assert.strictEqual(forwarded.document.text, '%@MACRO\nN10;\n');
   assert.strictEqual(forwarded.profile, 'generic');
+  assert.deepStrictEqual(forwarded.formatOptions, { tabSize: 2, insertSpaces: false });
 });
 
 test('createRustWasmAdapter surfaces a fallback-worthy error when the request ABI rejects the payload', () => {

@@ -818,10 +818,17 @@ const FORMAT_CASES = [
 ];
 
 function getRustEdit(rustCli, text) {
+  const macroText = text.startsWith('%@MACRO') ? text : `%@MACRO\n${text}`;
   const request = JSON.stringify({
     protocolVersion: 1,
-    document: { uri: 'file:///formatter.nc', version: 1, languageId: 'syntec-macro', text },
-    profile: 'generic'
+    document: {
+      uri: 'file:///formatter.nc',
+      version: 1,
+      languageId: 'syntec-macro',
+      text: macroText
+    },
+    profile: 'generic',
+    formatOptions: { tabSize: 4, insertSpaces: true }
   });
   const result = spawnSync(rustCli, ['--request'], {
     input: request,

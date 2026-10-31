@@ -10,7 +10,10 @@ const { provideHover } = require('./hoverProvider');
 const { provideDefinition } = require('./definitionProvider');
 const diagnostics = require('./diagnosticsProvider');
 const navigation = require('./navigationProvider');
-const { provideDocumentFormattingEdits } = require('./formattingProvider');
+const {
+  provideDocumentFormattingEdits,
+  provideDocumentRangeFormattingEdits
+} = require('./formattingProvider');
 // Host analyzer 初始化: await wasm 加载并缓存同步入口供
 // formattingProvider/navigationProvider 同步路径调用; 加载未完成或失败时
 // 返空 edits/symbols, 不回退 JS. 不阻塞 activate (异步加载), 失败仅日志.
@@ -79,6 +82,9 @@ function activate(context) {
   // Formatting
   context.subscriptions.push(
     vscode.languages.registerDocumentFormattingEditProvider(selector, { provideDocumentFormattingEdits })
+  );
+  context.subscriptions.push(
+    vscode.languages.registerDocumentRangeFormattingEditProvider(selector, { provideDocumentRangeFormattingEdits })
   );
 
   // Diagnostics

@@ -1,6 +1,6 @@
 # 架构说明（ARCHITECTURE）
 
-> 面向新接手者的一页式架构图景：Rust core → Wasm → host/worker 双路径 → VS Code provider 的调用链路与数据流。规则沉淀看 [MACRO 语法手册](handbook/README.md)；接续工作与发布流程看 [开发交接说明](开发交接说明.md)。本文档状态基线：v4.3.x（2026-09-27）。
+> 面向新接手者的一页式架构图景：Rust core → Wasm → host/worker 双路径 → VS Code provider 的调用链路与数据流。规则沉淀看 [MACRO 语法手册](handbook/README.md)；接续工作与发布流程看 [开发交接说明](开发交接说明.md)。本文档状态基线：v4.4.0（2026-10-31）。
 
 ## 总览
 
@@ -35,9 +35,11 @@ assets/rust-wasm/{manifest.json, syntec_core.wasm}
 ## 三条数据通路
 
 ### ① 纯 JS 数据表（无分析器参与）
+
 补全/悬停/跳转定义不走 Rust：`src/data/*.json`（函数、G/M 代码、系统变量、关键词）经 thin loader（`functions.js` 等，mtime-aware 只读缓存）读出，`definitionProvider` 用 `fileResolver` 做 FS 候选路径搜索。这些是**数据不是分析逻辑**；分析逻辑全部在 Rust。
 
 ### ② Host 同步路径（格式化 / 符号导航 / 引用）
+
 `extension.js::activate` 调一次 `initHostRustAnalyzer()`（异步、不阻塞 activate，失败仅 console.warn）加载 wasm 并缓存同步 adapter。provider 同步调 `getHostRustAnalyzer()`，**未就绪时返回 null → provider 返空 edits/symbols**（不回退 JS——JS 分析器已随 R1.2 退役，这是验收门禁 §3.1 的不变约束）。
 
 - `formattingProvider`：主分析 ABI
@@ -45,6 +47,7 @@ assets/rust-wasm/{manifest.json, syntec_core.wasm}
 - `navigationProvider` 异步 nav batch（工作区符号/引用）：`createNavOnlyAdapter(filePath)` 走 **nav-only ABI**（`syntec_core_analyze_navigation_json`，跳过 diagnostics+formatter，快 4-6 倍），并发 32 收集工作区导航索引，`navigationIndexCache` 按文档 version / 文件 mtime+size 签名缓存
 
 ### ③ Worker 异步路径（诊断）
+
 `diagnosticsProvider` 防抖 300ms 后把 `AnalysisRequest` 发给 `validatorWorker.js`（`worker_threads` 独立线程，避免大文件分析阻塞 Extension Host）。worker 内 LRU 8 槽缓存按 `protocolVersion+profile+uri+version+text` 精确命中。wasm 加载失败 → worker reject + control 日志 → host 侧跳过本轮诊断（不崩、不回退）。worker 的控制日志（如 wasm 加载失败原因）经 `workerLogSink` 转发到 `Syntec Macro Worker` OutputChannel——**排障第一步看这里**。
 
 ## Wasm ABI 层（rustWasmAdapter.js）
@@ -62,7 +65,7 @@ assets/rust-wasm/{manifest.json, syntec_core.wasm}
 
 ## 资产链路与完整性
 
-```
+```text
 crates/syntec-core (rlib + cdylib, bin: syntec-core-cli)
   → cargo build --release --target wasm32-unknown-unknown
   → scripts/buildRustWasmAsset.js 拷贝到 assets/rust-wasm/ + 生成 manifest

@@ -187,7 +187,7 @@ function splitPackedPointer(packed) {
 /**
  * P0-B 真实 request 传输: serialize the full `AnalysisRequest` JSON and let
  * Rust validate protocolVersion / document.uri / version / languageId / text /
- * profile. The Wasm ABI `syntec_core_analyze_request_json` returns 0 when the
+ * profile / optional formatOptions. The Wasm ABI `syntec_core_analyze_request_json` returns 0 when the
  * request is malformed; the contract is that the caller must take the explicit
  * `onFallback` path in that case, never silently post-fill document/profile.
  *
@@ -240,7 +240,10 @@ function createRustWasmAdapter(wasmExports, options = {}) {
       const requestJson = JSON.stringify({
         protocolVersion: normalizedRequest.protocolVersion,
         document: normalizedRequest.document,
-        profile: normalizedRequest.profile
+        profile: normalizedRequest.profile,
+        ...(normalizedRequest.formatOptions === undefined
+          ? {}
+          : { formatOptions: normalizedRequest.formatOptions })
       });
       const input = new TextEncoder().encode(requestJson);
       inputLength = input.length;
