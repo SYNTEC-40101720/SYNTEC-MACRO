@@ -127,14 +127,16 @@ function scheduleDiagnostics(document) {
 async function refreshDiagnostics(document) {
   if (!diagnosticCollection) return;
   if (document.languageId !== LANG_ID) return;
-  if (!isFeatureEnabled(document.uri, 'enableDiagnostics')) {
-    diagnosticCollection.delete(document.uri);
-    return;
-  }
 
   const docKey = document.uri.toString();
   const myRequestId = ++docRequestId;
   docRequestIds.set(docKey, myRequestId);
+
+  if (!isFeatureEnabled(document.uri, 'enableDiagnostics')) {
+    diagnosticCollection.delete(document.uri);
+    docRequestIds.delete(docKey);
+    return;
+  }
 
   const request = createAnalysisRequest(createDocumentSnapshot({
     uri: docKey,

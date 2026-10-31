@@ -13,6 +13,7 @@ const http = require('http');
 const packageJson = require('../package.json');
 
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const MAX_REDIRECTS = 5;
 let lastCheckAt = 0;
 
 const DEFAULT_MANIFEST_URL =
@@ -34,24 +35,74 @@ function compareVersions(a, b) {
 // 拉取 JSON 文本，8s 超时；跟随 GitHub release 跳转（重定向到对象存储）
 function fetchJsonText(url, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
-    const lib = url.startsWith('http:') ? http : https;
-    const req = lib.get(url, { timeout: timeoutMs }, res => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        res.resume();
-        const next = new URL(res.headers.location, url).toString();
-        return fetchJsonText(next, timeoutMs).then(resolve, reject);
+    let activeRequest = null;
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(totalTimeout);
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const totalTimeout = setTimeout(() => {
+      const error = new Error(`request timed out after ${timeoutMs}ms`);
+      if (activeRequest) activeRequest.destroy(error);
+      finish(error);
+    }, timeoutMs);
+
+    const request = (currentUrl, redirectsFollowed) => {
+      if (settled) return;
+      let parsedUrl;
+      try {
+        parsedUrl = new URL(currentUrl);
+      } catch (error) {
+        finish(error);
+        return;
       }
-      if (res.statusCode !== 200) {
-        res.resume();
-        return reject(new Error(`HTTP ${res.statusCode}`));
+      if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+        finish(new Error(`unsupported update manifest protocol: ${parsedUrl.protocol}`));
+        return;
       }
-      let body = '';
-      res.setEncoding('utf8');
-      res.on('data', chunk => { body += chunk; });
-      res.on('end', () => resolve(body));
-    });
-    req.on('timeout', () => req.destroy(new Error('timeout')));
-    req.on('error', reject);
+
+      const lib = parsedUrl.protocol === 'http:' ? http : https;
+      try {
+        const req = lib.get(parsedUrl, { timeout: timeoutMs }, res => {
+          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+            res.resume();
+            if (redirectsFollowed >= MAX_REDIRECTS) {
+              finish(new Error(`update manifest redirect limit exceeded (${MAX_REDIRECTS})`));
+              return;
+            }
+            let nextUrl;
+            try {
+              nextUrl = new URL(res.headers.location, parsedUrl).toString();
+            } catch (error) {
+              finish(error);
+              return;
+            }
+            request(nextUrl, redirectsFollowed + 1);
+            return;
+          }
+          if (res.statusCode !== 200) {
+            res.resume();
+            finish(new Error(`HTTP ${res.statusCode}`));
+            return;
+          }
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', chunk => { body += chunk; });
+          res.on('end', () => finish(null, body));
+          res.on('error', finish);
+        });
+        activeRequest = req;
+        req.on('timeout', () => req.destroy(new Error('timeout')));
+        req.on('error', finish);
+      } catch (error) {
+        finish(error);
+      }
+    };
+
+    request(url, 0);
   });
 }
 

@@ -11,6 +11,7 @@
 
 const assert = require('node:assert');
 const { test } = require('node:test');
+const workerThreads = require('node:worker_threads');
 const {
   installVscodeMock,
   uninstallVscodeMock,
@@ -35,6 +36,10 @@ function withVscodeMock(fn) {
   };
 }
 
+function delay(milliseconds) {
+  return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
+
 function makeDiagnostic(code, line, character, message = 'msg', span = 2) {
   return {
     code,
@@ -46,6 +51,87 @@ function makeDiagnostic(code, line, character, message = 'msg', span = 2) {
     }
   };
 }
+
+test('disabling diagnostics invalidates an in-flight validation result', async () => {
+  let diagnosticsEnabled = true;
+  installVscodeMock({
+    workspace: {
+      getConfiguration() {
+        return {
+          get(key, defaultValue) {
+            return key === 'enableDiagnostics' ? diagnosticsEnabled : defaultValue;
+          }
+        };
+      }
+    }
+  });
+  const originalWorker = workerThreads.Worker;
+  let request;
+  let resolveRequestSent;
+  const requestSent = new Promise(resolve => { resolveRequestSent = resolve; });
+
+  class ControlledWorker {
+    constructor() {
+      this.listeners = new Map();
+      ControlledWorker.instance = this;
+    }
+
+    on(event, listener) {
+      this.listeners.set(event, listener);
+      return this;
+    }
+
+    postMessage(message) {
+      request = message;
+      resolveRequestSent();
+    }
+
+    respond(message) {
+      this.listeners.get('message')(message);
+    }
+
+    terminate() {
+      return Promise.resolve(0);
+    }
+  }
+
+  workerThreads.Worker = ControlledWorker;
+  delete require.cache[require.resolve('../src/providerShared')];
+  delete require.cache[require.resolve('../src/diagnosticsProvider')];
+  const { setDiagnosticCollection, scheduleDiagnostics, dispose } = require('../src/diagnosticsProvider');
+  const collection = new DiagnosticCollectionMock('syntec-macro');
+  const uri = { toString: () => 'file:///diagnostics-race.nc' };
+  const document = {
+    uri,
+    languageId: 'syntec-macro',
+    version: 1,
+    getText: () => '#1 := 1;'
+  };
+  setDiagnosticCollection(collection);
+
+  try {
+    scheduleDiagnostics(document);
+    await requestSent;
+
+    diagnosticsEnabled = false;
+    scheduleDiagnostics(document);
+    await delay(350);
+    assert.strictEqual(collection.has(uri), false, 'disabled diagnostics should be cleared');
+
+    ControlledWorker.instance.respond({
+      id: request.id,
+      result: { diagnostics: [] }
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.strictEqual(collection.has(uri), false, 'a stale result must not restore diagnostics');
+  } finally {
+    dispose();
+    workerThreads.Worker = originalWorker;
+    delete require.cache[require.resolve('../src/diagnosticsProvider')];
+    delete require.cache[require.resolve('../src/providerShared')];
+    uninstallVscodeMock();
+  }
+});
 
 test('setDiagnosticCollection stores the collection and dispose clears timers', withVscodeMock(() => {
   const { setDiagnosticCollection, dispose } = loadDiagnosticsProvider();

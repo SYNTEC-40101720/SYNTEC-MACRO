@@ -4,10 +4,12 @@
 
 const assert = require('node:assert');
 const { test } = require('node:test');
+const http = require('node:http');
 
 const {
   compareVersions,
   parseLatestManifest,
+  fetchJsonText,
   checkForUpdate,
   DEFAULT_MANIFEST_URL,
   __resetThrottleForTest
@@ -112,4 +114,47 @@ test('checkForUpdate throttles repeat calls within interval', async () => {
 
 test('DEFAULT_MANIFEST_URL points at latest release asset', () => {
   assert.ok(DEFAULT_MANIFEST_URL.includes('/releases/latest/download/latest.json'));
+});
+
+test('fetchJsonText rejects an excessive redirect chain', async () => {
+  let requestCount = 0;
+  const server = http.createServer((_request, response) => {
+    requestCount += 1;
+    response.writeHead(302, { location: `/redirect/${requestCount}` });
+    response.end();
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const { port } = server.address();
+    await assert.rejects(
+      fetchJsonText(`http://127.0.0.1:${port}/start`, 1000),
+      /redirect limit/i
+    );
+    assert.ok(requestCount > 1, 'the request should follow some redirects before rejecting');
+  } finally {
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+});
+
+test('fetchJsonText enforces a total timeout while a response is streaming', async () => {
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.write('start');
+    const interval = setInterval(() => response.write('.'), 5);
+    response.on('close', () => clearInterval(interval));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const { port } = server.address();
+    const startedAt = Date.now();
+    await assert.rejects(
+      fetchJsonText(`http://127.0.0.1:${port}/stream`, 50),
+      /timed out/i
+    );
+    assert.ok(Date.now() - startedAt < 1000, 'the total timeout should bound the request duration');
+  } finally {
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
 });

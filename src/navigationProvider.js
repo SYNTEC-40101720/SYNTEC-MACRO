@@ -150,7 +150,8 @@ async function getWorkspaceMacroFiles(token) {
       // host 未就绪 (policy='empty') 返 null, 上层按 null 跳过该 file.
       // JS analyzeNavigationDocument 路径已移除 (analysisCore.js 即将 git rm).
       const navAdapter = createNavOnlyAdapter(filePath);
-      const index = navAdapter ? navAdapter(request).navigation : null;
+      if (!navAdapter) return null;
+      const index = navAdapter(request).navigation;
       navigationIndexCache.set(uriKey, {
         signature,
         source: openDocument ? 'document' : 'file',
