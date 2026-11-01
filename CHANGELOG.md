@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## 4.6.0 - 2026-11-01
+
+### Changed
+
+- 格式化改为独立的 `Syntec宏程序格式化` 命令，通过 VS Code 原生 Diff 提供只读预览；用户确认后才写回并保存原始宏文件，取消不修改，并发编辑不会被覆盖。扩展不再注册标准全文/范围格式化 provider，不再占用标准 VS Code Format Document。
+
 ## 4.5.0 - 2026-10-31
 
 ### Changed

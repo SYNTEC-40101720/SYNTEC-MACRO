@@ -1,4 +1,6 @@
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const vscode = require('vscode');
 
@@ -332,45 +334,68 @@ const tests = [
     }
   },
   {
-    name: 'formatter adjusts indentation conservatively',
+    name: 'formatter uses the custom command instead of the standard provider',
     run: async () => {
-      const document = await openSyntecDocument('%@MACRO\nIF #1 = 1 THEN   \n#2 := 1;\nEND_IF;');
+      const document = await openSyntecDocument('%@MACRO\n#1 := 1;');
       const edits = await vscode.commands.executeCommand(
         'vscode.executeFormatDocumentProvider',
         document.uri,
         { insertSpaces: true, tabSize: 4 }
       );
 
-      assert.ok(edits.length > 0, 'formatter should provide edits');
-      const workspaceEdit = new vscode.WorkspaceEdit();
-      for (const edit of edits) workspaceEdit.replace(document.uri, edit.range, edit.newText);
-      await vscode.workspace.applyEdit(workspaceEdit);
-
-      assert.strictEqual(document.getText(), '%@MACRO\nIF #1 = 1 THEN\n    #2 := 1;\nEND_IF;');
+      assert.ok(
+        edits === undefined || edits === null || edits.length === 0,
+        'standard formatter should not provide extension edits'
+      );
+      const commands = await vscode.commands.getCommands(true);
+      assert.ok(commands.includes('syntecMacro.formatWithReview'), 'custom formatter command should be registered');
     }
   },
   {
-    name: 'formatter spaces operators while preserving motion arguments',
+    name: 'workspace edits can save the original document after opening a native diff',
     run: async () => {
-      const document = await openSyntecDocument('%@MACRO\n#1:=#2+3*4;\nIF #1>=-2 AND#2<>0 THEN\nG200 X1=50.;\nEND_IF;');
-      const edits = await vscode.commands.executeCommand(
-        'vscode.executeFormatDocumentProvider',
+      const originalText = '%@MACRO\nN10  G00 X0;';
+      const formattedText = '%@MACRO\nN10 G00 X0;';
+      const tempDirectory = path.join(os.tmpdir(), 'syntec-macro-format-review-integration');
+      fs.rmSync(tempDirectory, { recursive: true, force: true });
+      fs.mkdirSync(tempDirectory, { recursive: true });
+      const filePath = path.join(tempDirectory, 'program.nc');
+      fs.writeFileSync(filePath, originalText, 'utf8');
+
+      const document = await vscode.workspace.openTextDocument(filePath);
+      await vscode.window.showTextDocument(document);
+      const formattedDocument = await vscode.workspace.openTextDocument({
+        language: LANG_ID,
+        content: formattedText
+      });
+
+      assert.strictEqual(document.languageId, LANG_ID);
+      await vscode.commands.executeCommand(
+        'vscode.diff',
         document.uri,
-        { insertSpaces: true, tabSize: 4 }
+        formattedDocument.uri,
+        'format review integration'
       );
 
-      assert.ok(edits.length > 0, 'formatter should provide edits');
+      const diffTab = vscode.window.tabGroups.all
+        .flatMap(group => group.tabs || [])
+        .find(tab => tab.input instanceof vscode.TabInputTextDiff &&
+          tab.input.original.toString() === document.uri.toString() &&
+          tab.input.modified.toString() === formattedDocument.uri.toString());
+      assert.ok(diffTab, 'the native diff should be open for the original and formatted documents');
+
       const workspaceEdit = new vscode.WorkspaceEdit();
-      for (const edit of edits) workspaceEdit.replace(document.uri, edit.range, edit.newText);
-      await vscode.workspace.applyEdit(workspaceEdit);
-
-      assert.strictEqual(document.getText(), '%@MACRO\n#1 := #2 + 3 * 4;\nIF #1 >= -2 AND #2 <> 0 THEN\n    G200 X1=50.;\nEND_IF;');
-      const repeatedEdits = await vscode.commands.executeCommand(
-        'vscode.executeFormatDocumentProvider',
+      workspaceEdit.replace(
         document.uri,
-        { insertSpaces: true, tabSize: 4 }
+        new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)),
+        formattedText
       );
-      assert.ok(!repeatedEdits || repeatedEdits.length === 0, 'formatter should be idempotent');
+      const edited = await vscode.workspace.applyEdit(workspaceEdit);
+      assert.strictEqual(edited, true, 'workspace.applyEdit should edit the original document while the diff is open');
+      assert.strictEqual(document.getText(), formattedText);
+      assert.strictEqual(await document.save(), true, 'the original document should save successfully');
+      assert.strictEqual(fs.readFileSync(filePath, 'utf8'), formattedText);
+      await vscode.window.showTextDocument(document);
     }
   },
   {

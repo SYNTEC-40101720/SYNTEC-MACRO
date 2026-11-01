@@ -1,6 +1,6 @@
 # SYNTEC 宏程序 VS Code 扩展
 
-![Version](https://img.shields.io/badge/version-4.5.0-blue)
+![Version](https://img.shields.io/badge/version-4.6.0-blue)
 
 为新代宏程序（syntec-macro）提供语法高亮、补全、悬停说明、代码跳转和实时诊断。
 
@@ -37,7 +37,9 @@ END_IF;
 | 查找引用 | 在静态调用目标上按 `Shift+F12` |
 | 符号导航 | `Ctrl+Shift+O` 查看 N 标签和宏入口 |
 | 工作区符号 | `Ctrl+T` 搜索 G/O 程序、宏入口和 N 标签 |
-| 格式化 | 右键选择“格式化文档” |
+| 格式化 | 右键选择“Syntec宏程序格式化”，或从命令面板运行同名命令 |
+
+格式化命令会打开 VS Code 原生差异预览（右侧只读）；确认后才写回并保存原始宏文件，取消则不修改。
 
 格式化会整理赋值、算术、比较及逻辑运算符周围的空格，`NOT` 与操作数之间也会留空格；负数和坐标符号、扩展参数、注释及字符串均按原意保留。
 

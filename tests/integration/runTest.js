@@ -1,6 +1,7 @@
 // Runs VS Code integration tests for this extension.
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { runTests } = require('@vscode/test-electron');
 const { buildFixture } = require('../../scripts/benchmarkNavigation');
@@ -14,6 +15,7 @@ async function main() {
   );
   const testWorkspace = path.resolve(__dirname, 'test.code-workspace');
   const benchmarkRoot = path.resolve(__dirname, 'workspace', 'navigation-benchmark-generated');
+  const formatReviewRoot = path.join(os.tmpdir(), 'syntec-macro-format-review-integration');
 
   if (runNavigationBenchmark) {
     fs.mkdirSync(benchmarkRoot, { recursive: true });
@@ -30,6 +32,7 @@ async function main() {
     });
   } finally {
     if (runNavigationBenchmark) fs.rmSync(benchmarkRoot, { recursive: true, force: true });
+    fs.rmSync(formatReviewRoot, { recursive: true, force: true });
   }
 }
 

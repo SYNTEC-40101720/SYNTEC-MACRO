@@ -10,15 +10,40 @@ const { provideHover } = require('./hoverProvider');
 const { provideDefinition } = require('./definitionProvider');
 const diagnostics = require('./diagnosticsProvider');
 const navigation = require('./navigationProvider');
-const {
-  provideDocumentFormattingEdits,
-  provideDocumentRangeFormattingEdits
-} = require('./formattingProvider');
+const { provideDocumentFormattingEdits } = require('./formattingProvider');
 // Host analyzer 初始化: await wasm 加载并缓存同步入口供
 // formattingProvider/navigationProvider 同步路径调用; 加载未完成或失败时
 // 返空 edits/symbols, 不回退 JS. 不阻塞 activate (异步加载), 失败仅日志.
 const { initHostRustAnalyzer } = require('./hostRustAnalyzer');
 const { checkForUpdate, notifyUpdate } = require('./updateCheck');
+
+let formatReviewSchemeSequence = 0;
+
+function offsetAt(text, position) {
+  let offset = 0;
+  let line = 0;
+  while (line < position.line) {
+    const lineEnd = text.indexOf('\n', offset);
+    if (lineEnd === -1) return text.length;
+    offset = lineEnd + 1;
+    line += 1;
+  }
+  return Math.min(offset + position.character, text.length);
+}
+
+function applyTextEdits(text, edits) {
+  const descendingEdits = edits.map(edit => ({
+    start: offsetAt(text, edit.range.start),
+    end: offsetAt(text, edit.range.end),
+    newText: edit.newText
+  })).sort((first, second) => second.start - first.start || second.end - first.end);
+
+  let formattedText = text;
+  for (const edit of descendingEdits) {
+    formattedText = formattedText.slice(0, edit.start) + edit.newText + formattedText.slice(edit.end);
+  }
+  return formattedText;
+}
 
 function activate(context) {
   const selector = { language: LANG_ID };
@@ -79,14 +104,6 @@ function activate(context) {
     vscode.languages.registerReferenceProvider(selector, { provideReferences: navigation.provideReferences })
   );
 
-  // Formatting
-  context.subscriptions.push(
-    vscode.languages.registerDocumentFormattingEditProvider(selector, { provideDocumentFormattingEdits })
-  );
-  context.subscriptions.push(
-    vscode.languages.registerDocumentRangeFormattingEditProvider(selector, { provideDocumentRangeFormattingEdits })
-  );
-
   // Diagnostics
   const diagnosticCollection = vscode.languages.createDiagnosticCollection(LANG_ID);
   context.subscriptions.push(diagnosticCollection);
@@ -117,6 +134,184 @@ function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand('syntecMacro.showWorkerLog', () => {
       workerOutputChannel.show();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('syntecMacro.formatWithReview', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor || editor.document.languageId !== LANG_ID) {
+        vscode.window.showInformationMessage('请先打开并激活一个 SYNTEC 宏程序文档。');
+        return;
+      }
+
+      const document = editor.document;
+      const originalText = document.getText();
+      const originalVersion = document.version;
+      const formatOptions = {
+        tabSize: editor.options.tabSize,
+        insertSpaces: editor.options.insertSpaces
+      };
+      const edits = await provideDocumentFormattingEdits(document, formatOptions);
+      const formattedText = applyTextEdits(originalText, Array.isArray(edits) ? edits : []);
+      const documentMatches = (text, version) => document.getText() === text &&
+        (version === undefined || document.version === version);
+      const notifyDocumentChanged = () => {
+        vscode.window.showInformationMessage('文档内容已发生变化，未覆盖现有内容。请重新运行“Syntec宏程序格式化”。');
+      };
+
+      if (!documentMatches(originalText, originalVersion)) {
+        notifyDocumentChanged();
+        return;
+      }
+
+      if (formattedText === originalText) {
+        vscode.window.showInformationMessage('格式化结果与当前内容相同，无需保存。');
+        return;
+      }
+
+      let formattedDocument;
+      let reviewProviderDisposable;
+      let diffOpenAttempted = false;
+      let existingReviewDiffTabs = new Set();
+      const isReviewDiffTab = tab => {
+        const TabInputTextDiff = vscode.TabInputTextDiff;
+        const input = tab?.input;
+        return typeof TabInputTextDiff === 'function' &&
+          input instanceof TabInputTextDiff &&
+          input.original?.toString() === document.uri.toString() &&
+          input.modified?.toString() === formattedDocument?.uri?.toString();
+      };
+      const getReviewDiffTabs = () => {
+        const tabGroups = vscode.window.tabGroups;
+        if (!tabGroups || typeof vscode.TabInputTextDiff !== 'function') return [];
+        return (tabGroups.all || [])
+          .flatMap(group => group.tabs || [])
+          .filter(isReviewDiffTab);
+      };
+      const closeReviewDiff = async () => {
+        try {
+          const tabGroups = vscode.window.tabGroups;
+          if (!tabGroups || typeof tabGroups.close !== 'function') return;
+          const tabs = (tabGroups.all || [])
+            .flatMap(group => [...(group.tabs || [])]);
+          for (const tab of tabs) {
+            if (!isReviewDiffTab(tab) || existingReviewDiffTabs.has(tab)) continue;
+            try {
+              await tabGroups.close(tab);
+            } catch {}
+          }
+        } catch {}
+      };
+
+      try {
+        try {
+          const reviewScheme = `syntec-macro-format-review-${++formatReviewSchemeSequence}`;
+          const reviewUri = vscode.Uri.parse(`${reviewScheme}:///formatted`);
+          reviewProviderDisposable = vscode.workspace.registerTextDocumentContentProvider(
+            reviewScheme,
+            { provideTextDocumentContent: () => formattedText }
+          );
+          formattedDocument = await vscode.workspace.openTextDocument(reviewUri);
+          formattedDocument = await vscode.languages.setTextDocumentLanguage(formattedDocument, LANG_ID);
+          existingReviewDiffTabs = new Set(getReviewDiffTabs());
+          diffOpenAttempted = true;
+          await vscode.commands.executeCommand(
+            'vscode.diff',
+            document.uri,
+            formattedDocument.uri,
+            `格式化差异: ${document.fileName}`
+          );
+        } catch {
+          vscode.window.showInformationMessage('显示格式化差异失败，未应用格式化结果。');
+          return;
+        }
+
+        const choice = await vscode.window.showInformationMessage(
+          '格式化结果已在 VS Code 差异视图中打开。右侧为只读预览，请使用“保存并写回原文件”按钮保存，不要对预览使用 Ctrl+S。原文保持不变；取消或关闭不编辑、不保存。',
+          { modal: false },
+          '保存并写回原文件',
+          '取消格式化'
+        );
+
+        if (!documentMatches(originalText, originalVersion)) {
+          notifyDocumentChanged();
+          return;
+        }
+        if (choice !== '保存并写回原文件') return;
+
+        const replaceDocumentText = async text => {
+          const currentText = document.getText();
+          const workspaceEdit = new vscode.WorkspaceEdit();
+          workspaceEdit.replace(
+            document.uri,
+            new vscode.Range(document.positionAt(0), document.positionAt(currentText.length)),
+            text
+          );
+          return vscode.workspace.applyEdit(workspaceEdit);
+        };
+        const restoreOriginalText = async expectedVersion => {
+          const currentText = document.getText();
+          if (currentText === originalText) return true;
+          if (currentText !== formattedText ||
+            (expectedVersion !== undefined && document.version !== expectedVersion)) return false;
+
+          try {
+            await replaceDocumentText(originalText);
+          } catch {
+            return document.getText() === originalText;
+          }
+          return document.getText() === originalText;
+        };
+        const notifyApplyFailure = async (message, expectedVersion) => {
+          const restored = await restoreOriginalText(expectedVersion);
+          vscode.window.showInformationMessage(restored
+            ? `${message}原内容已保留。`
+            : `${message}文档内容已变化，未覆盖现有内容。`);
+        };
+
+        const expectedAppliedVersion = originalVersion === undefined
+          ? undefined
+          : originalVersion + 1;
+        let applied = false;
+        try {
+          if (!documentMatches(originalText, originalVersion)) {
+            notifyDocumentChanged();
+            return;
+          }
+          applied = await replaceDocumentText(formattedText);
+        } catch {
+          await notifyApplyFailure('应用格式化结果失败。', expectedAppliedVersion);
+          return;
+        }
+        if (!applied || document.getText() !== formattedText) {
+          await notifyApplyFailure('应用格式化结果失败。', expectedAppliedVersion);
+          return;
+        }
+        if (expectedAppliedVersion !== undefined && document.version !== expectedAppliedVersion) {
+          notifyDocumentChanged();
+          return;
+        }
+
+        let saved = false;
+        let saveFailureReason = '';
+        try {
+          saved = await document.save();
+        } catch (error) {
+          saved = false;
+          saveFailureReason = error instanceof Error
+            ? `保存异常：${error.message}`
+            : 'document.save() 抛出异常。';
+        }
+        if (!saved) {
+          vscode.window.showErrorMessage(
+            `格式化内容已写回原文件，但尚未保存。右侧为只读预览，不要对预览使用 Ctrl+S；请返回原文件编辑器重试保存。${saveFailureReason || 'document.save() 返回 false。'}`
+          );
+        }
+      } finally {
+        if (diffOpenAttempted) await closeReviewDiff();
+        reviewProviderDisposable?.dispose();
+      }
     })
   );
 

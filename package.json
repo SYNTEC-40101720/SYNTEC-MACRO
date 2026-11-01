@@ -3,7 +3,7 @@
   "displayName": "SYNTEC 宏程序",
   "description": "为新代（Syntec）CNC 宏程序提供语法高亮、智能补全、悬停文档、G/M代码跳转、实时语法检查",
   "icon": "images/icon.png",
-  "version": "4.5.0",
+  "version": "4.6.0",
   "publisher": "syntec-team",
   "repository": {
     "type": "git",
@@ -57,6 +57,27 @@
         "path": "./snippets/syntec-macro.json"
       }
     ],
+    "commands": [
+      {
+        "command": "syntecMacro.formatWithReview",
+        "title": "Syntec宏程序格式化"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "syntecMacro.formatWithReview",
+          "when": "editorLangId == syntec-macro",
+          "group": "1_modification"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "syntecMacro.formatWithReview",
+          "when": "editorLangId == syntec-macro"
+        }
+      ]
+    },
     "configurationDefaults": {
       "[syntec-macro]": {
         "editor.tabSize": 4,

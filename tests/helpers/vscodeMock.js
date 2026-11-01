@@ -79,7 +79,7 @@ class Uri {
   }
 
   static parse(value) {
-    const match = /^([a-z]+):\/\/(.*)$/.exec(value);
+    const match = /^([a-z][a-z0-9+.-]*):\/\/(.*)$/i.exec(value);
     if (!match) return new Uri('file', value);
     return new Uri(match[1], match[2]);
   }
