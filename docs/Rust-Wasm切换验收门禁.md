@@ -13,9 +13,11 @@
 
 ### 发布收口状态
 
-- 当前候选版本：`v4.6.1`（2026-11-02）；最新已发布版本：`v4.6.0`。
+- 当前发布版本：`v4.6.1`（2026-11-02）；tag 指向发布提交 `27a838f`。
 - 本次改动：格式化预览增加常驻状态栏入口、差异编辑器标题栏保存/取消操作及语义色图标。
-- 发布状态：候选包已生成；严格门禁、主线推送、tag 与 GitHub Release 尚待完成。
+- GitHub Release：[v4.6.1](https://github.com/SYNTEC-40101720/syntec-macro/releases/tag/v4.6.1)；workflow `41403222458` 全部成功。
+- 正式 VSIX：226669 bytes，SHA-256 `b0a2b2aea60a7dd7fe4adbbdf7768f6974db0f5ffbb8bf2ab21cb55d62f761ef`；`latest.json` SHA-256 `718ef81d40ed1988de2b18184d6f58ce41d01ce3090fed520734c29f9b968585`。
+- 发布状态：严格 readiness、治理、测试、lint、集成、VSIX 打包及安装 smoke 均通过。
 
 ```powershell
 Set-Location D:\FN\syntec-macro
@@ -62,6 +64,7 @@ npm.cmd run smoke:installed
 ## 5. 文档入口
 
 全部文档的角色与阅读顺序见 `docs/README.md`（文档地图，唯一维护点）。关键入口：
+
 - 主线索引 (每次新会话先读): `docs/开发交接说明.md`
 - 发布 Runbook: `docs/Release-Runbook.md`
 - 诊断治理四件套: `docs/MACRO能力矩阵.md` + `docs/handbook/`(分册) + `docs/Rust诊断parity清单.md` + `src/diagnosticActions.js`
