@@ -370,6 +370,7 @@ class StatusBarItem {
     this.priority = priority;
     this.text = '';
     this.tooltip = '';
+    this.command = undefined;
     this._shown = false;
     this._disposed = false;
   }
@@ -387,14 +388,31 @@ class StatusBarItem {
   }
 }
 
+class ThemeColor {
+  constructor(id) {
+    this.id = id;
+  }
+}
+
+class ThemeIcon {
+  constructor(id, color) {
+    this.id = id;
+    this.color = color;
+  }
+}
+
 const window = {
-  _calls: { showInformationMessage: [], createOutputChannel: [] },
+  _calls: { showInformationMessage: [], showQuickPick: [], createStatusBarItem: [], createOutputChannel: [] },
   _resetCalls() {
     window._calls.showInformationMessage = [];
+    window._calls.showQuickPick = [];
+    window._calls.createStatusBarItem = [];
     window._calls.createOutputChannel = [];
   },
   createStatusBarItem(alignment, priority) {
-    return new StatusBarItem(alignment, priority);
+    const item = new StatusBarItem(alignment, priority);
+    window._calls.createStatusBarItem.push(item);
+    return item;
   },
   createOutputChannel(name) {
     window._calls.createOutputChannel.push(name);
@@ -408,6 +426,10 @@ const window = {
   },
   showInformationMessage(message) {
     window._calls.showInformationMessage.push(message);
+    return Promise.resolve();
+  },
+  showQuickPick(items, options) {
+    window._calls.showQuickPick.push({ items, options });
     return Promise.resolve();
   }
 };
@@ -537,6 +559,8 @@ const vscodeMock = {
   EventEmitter,
   StatusBarItem,
   StatusBarAlignment,
+  ThemeColor,
+  ThemeIcon,
   CodeAction,
   CodeActionKind,
   WorkspaceEdit,
@@ -620,6 +644,8 @@ module.exports = {
   EventEmitter,
   StatusBarItem,
   StatusBarAlignment,
+  ThemeColor,
+  ThemeIcon,
   CodeAction,
   CodeActionKind,
   WorkspaceEdit,

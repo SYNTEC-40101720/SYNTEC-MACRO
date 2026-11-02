@@ -3,7 +3,7 @@
   "displayName": "SYNTEC 宏程序",
   "description": "为新代（Syntec）CNC 宏程序提供语法高亮、智能补全、悬停文档、G/M代码跳转、实时语法检查",
   "icon": "images/icon.png",
-  "version": "4.6.0",
+  "version": "4.6.1",
   "publisher": "syntec-team",
   "repository": {
     "type": "git",
@@ -61,6 +61,16 @@
       {
         "command": "syntecMacro.formatWithReview",
         "title": "Syntec宏程序格式化"
+      },
+      {
+        "command": "syntecMacro.saveFormatReview",
+        "title": "保存并写回格式化结果",
+        "icon": "$(save)"
+      },
+      {
+        "command": "syntecMacro.cancelFormatReview",
+        "title": "取消格式化预览",
+        "icon": "$(close)"
       }
     ],
     "menus": {
@@ -71,10 +81,30 @@
           "group": "1_modification"
         }
       ],
+      "editor/title": [
+        {
+          "command": "syntecMacro.saveFormatReview",
+          "when": "syntecMacro.formatReviewPending && isInDiffEditor",
+          "group": "navigation@1"
+        },
+        {
+          "command": "syntecMacro.cancelFormatReview",
+          "when": "syntecMacro.formatReviewPending && isInDiffEditor",
+          "group": "navigation@2"
+        }
+      ],
       "commandPalette": [
         {
           "command": "syntecMacro.formatWithReview",
           "when": "editorLangId == syntec-macro"
+        },
+        {
+          "command": "syntecMacro.saveFormatReview",
+          "when": "syntecMacro.formatReviewPending"
+        },
+        {
+          "command": "syntecMacro.cancelFormatReview",
+          "when": "syntecMacro.formatReviewPending"
         }
       ]
     },

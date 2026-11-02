@@ -47,6 +47,8 @@ function applyTextEdits(text, edits) {
 
 function activate(context) {
   const selector = { language: LANG_ID };
+  let pendingFormatReview = null;
+  let formatReviewInProgress = false;
 
   initHostRustAnalyzer().catch(error => {
     console.warn('[hostRustAnalyzer] 初始化失败, host provider 将返空:', error instanceof Error ? error.message : error);
@@ -137,11 +139,64 @@ function activate(context) {
     })
   );
 
+  const formatReviewStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  formatReviewStatus.text = '$(diff) 格式化预览待处理';
+  formatReviewStatus.tooltip = '右侧为只读预览，不要对预览使用 Ctrl+S。使用标题栏按钮或此处菜单保存；关闭预览会取消且不修改原文。';
+  formatReviewStatus.command = 'syntecMacro.chooseFormatReviewAction';
+  context.subscriptions.push(formatReviewStatus);
+
+  const updateFormatReviewContext = async isPending => {
+    try {
+      await vscode.commands.executeCommand('setContext', 'syntecMacro.formatReviewPending', isPending);
+    } catch {}
+  };
+  const settleFormatReview = async choice => {
+    if (!pendingFormatReview) return;
+    const pending = pendingFormatReview;
+    pendingFormatReview = null;
+    formatReviewStatus.hide();
+    await updateFormatReviewContext(false);
+    pending.resolve(choice);
+  };
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('syntecMacro.saveFormatReview', () => {
+      return settleFormatReview('保存并写回原文件');
+    }),
+    vscode.commands.registerCommand('syntecMacro.cancelFormatReview', () => {
+      return settleFormatReview('取消格式化');
+    }),
+    vscode.commands.registerCommand('syntecMacro.chooseFormatReviewAction', async () => {
+      if (!pendingFormatReview) return;
+      const choices = [
+        {
+          label: '保存并写回原文件',
+          iconPath: new vscode.ThemeIcon('save', new vscode.ThemeColor('charts.green'))
+        },
+        {
+          label: '取消格式化',
+          iconPath: new vscode.ThemeIcon('close', new vscode.ThemeColor('charts.red'))
+        }
+      ];
+      const choice = await vscode.window.showQuickPick(
+        choices,
+        { placeHolder: '格式化预览待处理' }
+      );
+      if (choice?.label === '保存并写回原文件' || choice?.label === '取消格式化') {
+        await settleFormatReview(choice.label);
+      }
+    })
+  );
+
   context.subscriptions.push(
     vscode.commands.registerCommand('syntecMacro.formatWithReview', async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor || editor.document.languageId !== LANG_ID) {
         vscode.window.showInformationMessage('请先打开并激活一个 SYNTEC 宏程序文档。');
+        return;
+      }
+      if (formatReviewInProgress) {
+        vscode.window.showInformationMessage('请先处理当前格式化预览。');
         return;
       }
 
@@ -169,9 +224,15 @@ function activate(context) {
         vscode.window.showInformationMessage('格式化结果与当前内容相同，无需保存。');
         return;
       }
+      if (formatReviewInProgress) {
+        vscode.window.showInformationMessage('请先处理当前格式化预览。');
+        return;
+      }
+      formatReviewInProgress = true;
 
       let formattedDocument;
       let reviewProviderDisposable;
+      let reviewTabsDisposable;
       let diffOpenAttempted = false;
       let existingReviewDiffTabs = new Set();
       const isReviewDiffTab = tab => {
@@ -227,12 +288,18 @@ function activate(context) {
           return;
         }
 
-        const choice = await vscode.window.showInformationMessage(
-          '格式化结果已在 VS Code 差异视图中打开。右侧为只读预览，请使用“保存并写回原文件”按钮保存，不要对预览使用 Ctrl+S。原文保持不变；取消或关闭不编辑、不保存。',
-          { modal: false },
-          '保存并写回原文件',
-          '取消格式化'
-        );
+        let resolveChoice;
+        const choicePromise = new Promise(resolve => { resolveChoice = resolve; });
+        pendingFormatReview = { resolve: resolveChoice };
+        const tabGroups = vscode.window.tabGroups;
+        if (tabGroups && typeof tabGroups.onDidChangeTabs === 'function') {
+          reviewTabsDisposable = tabGroups.onDidChangeTabs(() => {
+            if (getReviewDiffTabs().length === 0) void settleFormatReview(undefined);
+          });
+        }
+        formatReviewStatus.show();
+        await updateFormatReviewContext(true);
+        const choice = await choicePromise;
 
         if (!documentMatches(originalText, originalVersion)) {
           notifyDocumentChanged();
@@ -309,8 +376,13 @@ function activate(context) {
           );
         }
       } finally {
+        reviewTabsDisposable?.dispose();
+        if (pendingFormatReview) await settleFormatReview(undefined);
+        formatReviewStatus.hide();
+        await updateFormatReviewContext(false);
         if (diffOpenAttempted) await closeReviewDiff();
         reviewProviderDisposable?.dispose();
+        formatReviewInProgress = false;
       }
     })
   );

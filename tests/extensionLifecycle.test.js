@@ -54,6 +54,7 @@ function withAsyncVscodeMock(fn) {
     const originalExecuteCommand = commands.executeCommand;
     const originalActiveTextEditor = vscode.window.activeTextEditor;
     const originalShowInformationMessage = vscode.window.showInformationMessage;
+    const originalShowQuickPick = vscode.window.showQuickPick;
     const originalOpenTextDocument = vscode.workspace.openTextDocument;
     const originalRegisterTextDocumentContentProvider = vscode.workspace.registerTextDocumentContentProvider;
     const originalSetTextDocumentLanguage = vscode.languages.setTextDocumentLanguage;
@@ -69,6 +70,7 @@ function withAsyncVscodeMock(fn) {
       if (originalActiveTextEditor === undefined) delete vscode.window.activeTextEditor;
       else vscode.window.activeTextEditor = originalActiveTextEditor;
       vscode.window.showInformationMessage = originalShowInformationMessage;
+      vscode.window.showQuickPick = originalShowQuickPick;
       if (originalOpenTextDocument === undefined) delete vscode.workspace.openTextDocument;
       else vscode.workspace.openTextDocument = originalOpenTextDocument;
       if (originalRegisterTextDocumentContentProvider === undefined) {
@@ -164,6 +166,9 @@ function stubReviewDiff(vscode, document) {
   const closeCalls = [];
   const tabs = [];
   const openedDiffTabs = [];
+  const tabListeners = new Set();
+  let resolveDiffOpened;
+  const diffOpened = new Promise(resolve => { resolveDiffOpened = resolve; });
   const group = { tabs };
   class TabInputTextDiff {
     constructor(original, modified) {
@@ -215,10 +220,15 @@ function stubReviewDiff(vscode, document) {
   };
   vscode.window.tabGroups = {
     all: [group],
+    onDidChangeTabs(listener) {
+      tabListeners.add(listener);
+      return { dispose() { tabListeners.delete(listener); } };
+    },
     async close(tab) {
       closeCalls.push(tab);
       const index = tabs.indexOf(tab);
       if (index >= 0) tabs.splice(index, 1);
+      for (const listener of tabListeners) listener({ closed: [tab], opened: [], changed: [] });
       return true;
     }
   };
@@ -233,6 +243,7 @@ function stubReviewDiff(vscode, document) {
     diffCalls,
     applyEditCalls,
     closeCalls,
+    diffOpened,
     tabs,
     openedDiffTabs,
     addTab(tab) {
@@ -246,9 +257,19 @@ function stubReviewDiff(vscode, document) {
     },
     openDiff(...args) {
       diffCalls.push(args);
-      return this.addDiffTab(args[0], args[1]);
+      const tab = this.addDiffTab(args[0], args[1]);
+      resolveDiffOpened(tab);
+      return tab;
+    },
+    closeDiffTab(tab) {
+      return vscode.window.tabGroups.close(tab);
     }
   };
+}
+
+async function waitForFormatReview(reviewDiff) {
+  await reviewDiff.diffOpened;
+  await new Promise(resolve => setImmediate(resolve));
 }
 
 test('activate registers 8 language providers and 1 diagnostic collection', withVscodeMock(() => {
@@ -316,7 +337,7 @@ test('formatWithReview previews without editing and saves only after confirmatio
   ];
   const commandCalls = [];
   const actions = [];
-  const confirmationCalls = [];
+  const quickPickCalls = [];
   const formattingProvider = stubFormattingProvider(edits);
   let saveCalls = 0;
 
@@ -336,17 +357,21 @@ test('formatWithReview previews without editing and saves only after confirmatio
     if (commandId === 'vscode.diff') return reviewDiff.openDiff(...args);
     throw new Error(`unexpected command: ${commandId}`);
   };
-  vscode.window.showInformationMessage = async (...args) => {
+  vscode.window.showQuickPick = async (...args) => {
     assert.strictEqual(document.getText(), originalText, 'the original text must remain in the editor before confirmation');
     assert.strictEqual(document.version, 1, 'the document version must not change before confirmation');
     assert.strictEqual(document.isDirty, false, 'the document must remain clean before confirmation');
     assert.deepStrictEqual(actions, [], 'editor.edit must not run before confirmation');
     assert.strictEqual(saveCalls, 0, 'document must not be saved before confirmation');
-    assert.ok(args[0].includes('差异视图'));
-    assert.ok(args[0].includes('右侧为只读预览'));
-    assert.ok(args[0].includes('保存并写回原文件'));
-    assert.ok(args[0].includes('不要对预览使用 Ctrl+S'));
-    assert.ok(args[0].includes('取消或关闭不编辑、不保存'));
+    assert.deepStrictEqual(args[0].map(item => item.label), ['保存并写回原文件', '取消格式化']);
+    assert.deepStrictEqual(args[0].map(item => ({
+      icon: item.iconPath.id,
+      color: item.iconPath.color.id
+    })), [
+      { icon: 'save', color: 'charts.green' },
+      { icon: 'close', color: 'charts.red' }
+    ]);
+    assert.deepStrictEqual(args[1], { placeHolder: '格式化预览待处理' });
     assert.strictEqual(reviewDiff.openTextDocumentCalls.length, 1);
     const previewUri = reviewDiff.openTextDocumentCalls[0];
     assert.strictEqual(previewUri.scheme, reviewDiff.contentProviders[0].scheme);
@@ -362,27 +387,33 @@ test('formatWithReview previews without editing and saves only after confirmatio
       '格式化差异: program.nc'
     ]]);
     actions.push('confirm');
-    confirmationCalls.push(args);
-    return '保存并写回原文件';
+    quickPickCalls.push(args);
+    return args[0][0];
   };
 
   const handler = commands._calls.find(call => call.commandId === 'syntecMacro.formatWithReview').handler;
-  await handler();
+  const pending = handler();
+  await waitForFormatReview(reviewDiff);
+  const statusItem = vscode.window._calls.createStatusBarItem.at(-1);
+  assert.ok(statusItem._shown);
+  assert.strictEqual(statusItem.text, '$(diff) 格式化预览待处理');
+  assert.strictEqual(statusItem.command, 'syntecMacro.chooseFormatReviewAction');
+  assert.ok(statusItem.tooltip.includes('不要对预览使用 Ctrl+S'));
+  assert.ok(statusItem.tooltip.includes('关闭预览会取消'));
+  await commands._calls.find(call => call.commandId === 'syntecMacro.chooseFormatReviewAction').handler();
+  await pending;
 
   assert.deepStrictEqual(formattingProvider.calls, [{
     document,
     formatOptions: { tabSize: 6, insertSpaces: false }
   }]);
-  assert.deepStrictEqual(commandCalls.map(call => call.commandId), ['vscode.diff']);
+  assert.deepStrictEqual(commandCalls.map(call => call.commandId).filter(commandId => commandId === 'vscode.diff'), ['vscode.diff']);
   assert.strictEqual(reviewDiff.openTextDocumentCalls.length, 1);
   assert.strictEqual(document.getText(), formattedText);
   assert.strictEqual(document.isDirty, false);
   assert.strictEqual(reviewDiff.openedDocuments[0].saveCalls, 0, 'the temporary formatted document must not be saved');
-  assert.deepStrictEqual(confirmationCalls[0].slice(1), [
-    { modal: false },
-    '保存并写回原文件',
-    '取消格式化'
-  ]);
+  assert.strictEqual(quickPickCalls.length, 1);
+  assert.ok(!statusItem._shown);
   assert.strictEqual(reviewDiff.applyEditCalls.length, 1);
   assert.strictEqual(reviewDiff.applyEditCalls[0]._ops[0].uri, document.uri);
   assert.deepStrictEqual(actions, ['confirm', 'save']);
@@ -391,6 +422,15 @@ test('formatWithReview previews without editing and saves only after confirmatio
   assert.deepStrictEqual(reviewDiff.closeCalls, reviewDiff.openedDiffTabs);
   assert.ok(reviewDiff.tabs.includes(otherTab), 'unrelated tabs must remain open');
 }));
+
+test('package contributes format-review actions only to diff editor titles', () => {
+  const titleActions = packageJson.contributes.menus['editor/title'];
+  assert.deepStrictEqual(titleActions.map(action => action.command), [
+    'syntecMacro.saveFormatReview',
+    'syntecMacro.cancelFormatReview'
+  ]);
+  assert.ok(titleActions.every(action => action.when.includes('syntecMacro.formatReviewPending') && action.when.includes('isInDiffEditor')));
+});
 
 for (const choice of ['取消格式化', undefined]) {
   test(`formatWithReview leaves the original text untouched when confirmation returns ${choice || 'no choice'}`, withAsyncVscodeMock(async vscode => {
@@ -416,27 +456,25 @@ for (const choice of ['取消格式化', undefined]) {
       if (commandId === 'vscode.diff') return reviewDiff.openDiff(...args);
       return undefined;
     };
-    vscode.window.showInformationMessage = async (...args) => {
-      assert.strictEqual(document.getText(), originalText);
-      assert.strictEqual(document.version, 1);
-      assert.strictEqual(document.isDirty, false);
-      assert.deepStrictEqual(actions, []);
-      assert.deepStrictEqual(args.slice(1), [
-        { modal: false },
-        '保存并写回原文件',
-        '取消格式化'
-      ]);
-      const previewUri = reviewDiff.openTextDocumentCalls[0];
-      assert.strictEqual(previewUri.scheme, reviewDiff.contentProviders[0].scheme);
-      assert.notStrictEqual(previewUri.scheme, 'untitled');
-      assert.deepStrictEqual(reviewDiff.providedTexts, ['N10 G00 X0']);
-      assert.strictEqual(reviewDiff.openedDocuments[0].languageId, 'syntec-macro');
-      assert.strictEqual(reviewDiff.openedDocuments[0].getText(), 'N10 G00 X0');
-      return choice;
-    };
-
     const handler = commands._calls.find(call => call.commandId === 'syntecMacro.formatWithReview').handler;
-    await handler();
+    const pending = handler();
+    await waitForFormatReview(reviewDiff);
+    assert.strictEqual(document.getText(), originalText);
+    assert.strictEqual(document.version, 1);
+    assert.strictEqual(document.isDirty, false);
+    assert.deepStrictEqual(actions, []);
+    const previewUri = reviewDiff.openTextDocumentCalls[0];
+    assert.strictEqual(previewUri.scheme, reviewDiff.contentProviders[0].scheme);
+    assert.notStrictEqual(previewUri.scheme, 'untitled');
+    assert.deepStrictEqual(reviewDiff.providedTexts, ['N10 G00 X0']);
+    assert.strictEqual(reviewDiff.openedDocuments[0].languageId, 'syntec-macro');
+    assert.strictEqual(reviewDiff.openedDocuments[0].getText(), 'N10 G00 X0');
+    if (choice === undefined) {
+      await reviewDiff.closeDiffTab(reviewDiff.openedDiffTabs[0]);
+    } else {
+      await commands._calls.find(call => call.commandId === 'syntecMacro.cancelFormatReview').handler();
+    }
+    await pending;
 
     assert.strictEqual(document.getText(), originalText);
     assert.strictEqual(document.version, 1);
@@ -464,9 +502,6 @@ test('formatWithReview does not overwrite edits made while confirmation is open'
   const reviewDiff = stubReviewDiff(vscode, document);
   const otherTab = reviewDiff.addTab({ input: { label: 'unrelated tab' } });
   const messages = [];
-  let resolveConfirmation;
-  let confirmationRequested;
-  const confirmationReady = new Promise(resolve => { confirmationRequested = resolve; });
   let saveCalls = 0;
 
   activateExtension(formattingProvider.provideDocumentFormattingEdits);
@@ -479,20 +514,16 @@ test('formatWithReview does not overwrite edits made while confirmation is open'
     if (commandId === 'vscode.diff') return reviewDiff.openDiff(...args);
     return undefined;
   };
-  vscode.window.showInformationMessage = (message, ...args) => {
+  vscode.window.showInformationMessage = message => {
     messages.push(message);
-    if (args.includes('保存并写回原文件')) {
-      confirmationRequested();
-      return new Promise(resolve => { resolveConfirmation = resolve; });
-    }
     return Promise.resolve();
   };
 
   const handler = commands._calls.find(call => call.commandId === 'syntecMacro.formatWithReview').handler;
   const pending = handler();
-  await confirmationReady;
+  await waitForFormatReview(reviewDiff);
   document.setText(concurrentText);
-  resolveConfirmation('保存并写回原文件');
+  await commands._calls.find(call => call.commandId === 'syntecMacro.saveFormatReview').handler();
   await pending;
 
   assert.strictEqual(document.getText(), concurrentText);
@@ -569,17 +600,14 @@ test('formatWithReview restores the original text when workspace.applyEdit repor
   };
   vscode.window.showInformationMessage = async message => {
     messages.push(message);
-    if (message.includes('差异视图')) {
-      assert.strictEqual(document.getText(), originalText);
-      assert.strictEqual(document.version, 1);
-      assert.strictEqual(document.isDirty, false);
-      assert.strictEqual(applyEditCalls, 0);
-    }
-    return '保存并写回原文件';
+    return undefined;
   };
 
   const handler = commands._calls.find(call => call.commandId === 'syntecMacro.formatWithReview').handler;
-  await handler();
+  const pending = handler();
+  await waitForFormatReview(reviewDiff);
+  await commands._calls.find(call => call.commandId === 'syntecMacro.saveFormatReview').handler();
+  await pending;
 
   assert.strictEqual(document.getText(), originalText);
   assert.strictEqual(document.isDirty, false);
@@ -619,15 +647,8 @@ for (const saveFailure of ['false', 'throw']) {
       if (commandId === 'vscode.diff') return reviewDiff.openDiff(...args);
       return undefined;
     };
-    vscode.window.showInformationMessage = async (message, ...args) => {
+    vscode.window.showInformationMessage = async message => {
       messages.push(message);
-      if (args.includes('保存并写回原文件')) {
-        assert.strictEqual(document.getText(), originalText);
-        assert.strictEqual(document.version, 1);
-        assert.strictEqual(document.isDirty, false);
-        assert.deepStrictEqual(actions, []);
-        return '保存并写回原文件';
-      }
       return undefined;
     };
     vscode.window.showErrorMessage = async message => {
@@ -636,7 +657,10 @@ for (const saveFailure of ['false', 'throw']) {
     };
 
     const handler = commands._calls.find(call => call.commandId === 'syntecMacro.formatWithReview').handler;
-    await handler();
+    const pending = handler();
+    await waitForFormatReview(reviewDiff);
+    await commands._calls.find(call => call.commandId === 'syntecMacro.saveFormatReview').handler();
+    await pending;
 
     assert.strictEqual(document.getText(), formattedText);
     assert.strictEqual(document.isDirty, true);

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## 4.6.1 - 2026-11-02
+
+### Changed
+
+- 格式化预览增加常驻状态栏入口和差异编辑器标题栏的保存/取消操作；关闭预览自动取消，保留原内容。
+
 ## 4.6.0 - 2026-11-01
 
 ### Changed
